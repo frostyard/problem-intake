@@ -7,7 +7,8 @@
 // And the host steps of docs/runbook/deploy.md that were missing at the
 // Worker go-live (2026-11-05, T885, deploy run 42097263781):
 // - the first deploy failed with code 10089 until Workers Analytics Engine
-//   was enabled on the account (bindings REPORTS and HEALTH);
+//   was enabled on the account (bindings REPORTS and HEALTH), and the
+//   enablement took a few minutes to apply (20:01Z failed, 20:04Z passed);
 // - "No access to the specified service" means the deploy token's Account
 //   Resources lack the account of CLOUDFLARE_ACCOUNT_ID.
 import assert from "node:assert/strict";
@@ -60,4 +61,5 @@ test("the deploy runbook explains the deploy errors of the go-live", () => {
   assert.match(trouble, /No access to the specified service/);
   assert.match(trouble, /Account Resources must include the account of `CLOUDFLARE_ACCOUNT_ID`, with Workers Scripts Edit/);
   assert.match(trouble, /10089/);
+  assert.match(trouble, /wait about 5 minutes, then re-run the failed job/);
 });

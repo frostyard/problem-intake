@@ -20,7 +20,8 @@ caddy's env file, never into Git, the homewiki or a report.
 2. **Analytics Engine.** Enable Workers Analytics Engine on the account
    (Dashboard → Storage & Databases → Analytics Engine) before the first
    deploy. The bindings `REPORTS` and `HEALTH` need it; without it the
-   deploy fails with code 10089 "You need to enable Analytics Engine".
+   deploy fails with code 10089 "You need to enable Analytics Engine". The
+   enablement can take a few minutes to apply.
 3. **Deploy token.** Create an API token for GitHub with: Workers Scripts
    Edit, Workers KV Storage Edit, Workers Routes Edit (or the custom domain
    permission) on the zone `frostyard.org`, Account Analytics Read, and
@@ -93,8 +94,11 @@ Merge the KV PR (step 2.1). The push to `main` runs the deploy workflow:
   `CLOUDFLARE_ACCOUNT_ID`, with Workers Scripts Edit (step 2.3). Check that
   `CLOUDFLARE_ACCOUNT_ID` is the account that the token names.
 - **Code 10089 "You need to enable Analytics Engine"** (bindings `REPORTS`
-  and `HEALTH`): enable Workers Analytics Engine on the account (step 2.2),
-  then run the deploy again.
+  and `HEALTH`): enable Workers Analytics Engine on the account (step 2.2).
+  The enablement can take a few minutes to apply: wait about 5 minutes, then
+  re-run the failed job. At the go-live (2026-11-05), the deploy at 20:01Z
+  still failed with 10089 after the enablement, and the re-run at 20:04Z
+  passed with no change.
 
 ## Kill switch
 
