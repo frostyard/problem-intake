@@ -355,6 +355,29 @@ describe("POST /v1/report: forward failures", () => {
     expect(point).toEqual({ indexes: ["forward_failed"], blobs: ["forward_failed", failure], doubles: [1] });
   });
 
+  function erroredBody(): ReadableStream<Uint8Array> {
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error("upstream body broke"));
+      },
+    });
+  }
+
+  it("accepts a report when a 2xx answer has an errored body", async () => {
+    mockFetch(() => new Response(erroredBody(), { status: 200 }));
+    const testEnv = makeEnv();
+    const response = await call(reportRequest(JSON.stringify(example("crash"))), testEnv);
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ status: "accepted" });
+    expect(testEnv.REPORTS.points).toHaveLength(1);
+    expect(testEnv.HEALTH.points).toHaveLength(0);
+  });
+
+  it("counts a non-2xx answer with an errored body as a failure", async () => {
+    mockFetch(() => new Response(erroredBody(), { status: 500 }));
+    expect((await failWith()).blobs).toEqual(["forward_failed", "5xx"]);
+  });
+
   it("counts a network error", async () => {
     mockFetch(() => {
       throw new TypeError("network down");

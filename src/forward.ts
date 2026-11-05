@@ -102,8 +102,9 @@ export async function forwardReport(report: Report, secrets: ForwardSecrets): Pr
     const name = error instanceof Error ? error.name : "";
     return { ok: false, failure: name === "TimeoutError" || name === "AbortError" ? "timeout" : "network" };
   }
-  // Drain the body so the connection is released; its content is not used.
-  await response.body?.cancel();
+  // Release the body; its content is not used. Best effort: an errored body
+  // rejects the cancel, and that must not change the result of the forward.
+  await response.body?.cancel().catch(() => undefined);
   if (response.status >= 200 && response.status < 300) return { ok: true };
   return { ok: false, failure: statusClass(response.status) };
 }
