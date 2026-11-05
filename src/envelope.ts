@@ -1,6 +1,8 @@
 // The Sentry event and envelope that the Worker sends to GlitchTip
 // (docs/design/intake.md). Built only from schema values of a validated
-// report. No request data, no client time, no IP, no server_name.
+// report. No request data, no client time, no IP, no server_name. The
+// report_id is only the event_id (32-hex form), never a tag: GlitchTip keeps
+// tag values for ever (ADR-0005).
 //
 // This module uses only erasable TypeScript, so Node can import it directly
 // (scripts/glitchtip-send-event.mjs in the GlitchTip CI job).
@@ -59,7 +61,6 @@ function groupKey(report: Report): string[] {
 export function buildEvent(report: Report): SentryEvent {
   const cls = classOf(report);
   const tags: Record<string, string> = {
-    report_id: report.report_id,
     week: report.week,
     image: report.image.id,
     image_version: report.image.version,

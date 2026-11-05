@@ -34,7 +34,7 @@
       "id": "destructive-operations",
       "decision": "review-required",
       "minimum_risk_tier": "high",
-      "paths": ["scripts/glitchtip-delete-report.sh"],
+      "paths": ["scripts/glitchtip-delete-report.sh", "scripts/glitchtip-cleanup-proof.sh"],
       "detectors": []
     },
     {

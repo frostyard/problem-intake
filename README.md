@@ -40,9 +40,11 @@ Contracts: [intake API](docs/specs/intake-api.md),
   `console` call.
 - Every document must pass the schema: closed shape, enums, patterns and the
   app ID allowlist; no free text.
-- GlitchTip gets each problem with a `report_id` tag, `user.ip_address` null
-  and no `server_name`. `count` reports never go to GlitchTip. GlitchTip keeps
-  events 80 days; with 7 days of snapshots that stays under 90 days.
+- GlitchTip gets each problem with the `report_id` as its event ID and in no
+  tag, `user.ip_address` null and no `server_name`. `count` reports never go to GlitchTip. GlitchTip's
+  retention is 72 days: with its partition cleanup and 7 days of snapshots,
+  data lives at most about 88 days, under 90 days
+  ([runbook](docs/runbook/glitchtip.md#retention)).
 - Public statistics are aggregates only. A cell from 1 to 4 is never
   published, and complementary cells are suppressed so that no small value
   returns by subtraction.
@@ -65,8 +67,9 @@ make ci BASE=origin/main
 
 `make check` runs the typecheck, the validator drift check, the node tests,
 vitest with coverage in workerd (GlitchTip and the SQL API are mocked), and
-`wrangler deploy --dry-run`. The GlitchTip CI job starts the Compose stack and
-proves the deletion runbook.
+`wrangler deploy --dry-run`. The GlitchTip CI job starts the Compose stack,
+proves the deletion runbook, and proves the nightly cleanup
+(`scripts/glitchtip-cleanup-proof.sh`).
 
 ## Operate
 

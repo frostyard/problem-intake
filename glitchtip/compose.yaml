@@ -1,42 +1,46 @@
 # GlitchTip for frostyard problem reports: a TrueNAS SCALE custom app
 # (docs/runbook/glitchtip.md, plan T857 section 5 "GlitchTip").
 #
-# Pinned by test/node/compose.test.mjs: 80-day event, transaction and file
-# life; sign-up and organization creation off; only web is published, on
-# 10.0.1.100; every image pinned by tag and digest; a healthcheck on web,
-# postgres and valkey; mem_limit on every service; no secret value.
+# Pinned by test/node/compose.test.mjs: 72-day event, transaction, file, log
+# and uptime life; sign-up and organization creation off; only web is
+# published, on 10.0.1.100; every image pinned by tag and digest; a
+# healthcheck on web, postgres and valkey; mem_limit on every service; no
+# secret value and no variable reference.
 #
-# Values marked ${NAME:?} have no default and are not in Git. Brian enters
-# them in the TrueNAS UI when he installs the app (the runbook says how).
+# Secrets and host names come from 1 env file on the NAS,
+# /mnt/fast/glitchtip/secrets/glitchtip.env (root, 0600; the names are in
+# glitchtip/.env.example). Brian writes it before the install (the runbook
+# says how), so this file is pasted into TrueNAS as it is, and an update diff
+# shows only image lines. A key in "environment" wins over the env file:
+# never add one of the env file's names here.
 # Images: tag plus the multi-arch index digest from Docker Hub (checked with
 # the Docker Hub API and skopeo inspect on 2026-11-05).
 
 name: glitchtip
 
-x-db-password: &db_password ${POSTGRES_PASSWORD:?set the database password in the TrueNAS UI}
+x-env-file: &env_file
+  - /mnt/fast/glitchtip/secrets/glitchtip.env
 
 x-environment: &environment
-  SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in the TrueNAS UI}
   DATABASE_HOST: postgres
   DATABASE_PORT: "5432"
   DATABASE_NAME: postgres
   DATABASE_USER: postgres
-  DATABASE_PASSWORD: *db_password
   VALKEY_URL: redis://valkey:6379/0
-  GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN:?set the GlitchTip URL}
-  ALLOWED_HOSTS: localhost,${GLITCHTIP_ALLOWED_HOSTS:?set the GlitchTip host names}
-  DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL:?set the sender address}
-  # Retention: 80 days, plus at most 7 days in snapshots, stays under 90 days.
-  GLITCHTIP_MAX_EVENT_LIFE_DAYS: "80"
-  GLITCHTIP_MAX_TRANSACTION_EVENT_LIFE_DAYS: "80"
-  GLITCHTIP_MAX_FILE_LIFE_DAYS: "80"
+  # Retention: 72 days. Daily event partitions add up to 2 days, weekly tag
+  # and aggregate partitions and the issue cleanup up to 9 days; with 7 days
+  # of snapshots the worst case is about 88 days, under the 90 days of the
+  # privacy page (docs/runbook/glitchtip.md, "Retention").
+  GLITCHTIP_MAX_EVENT_LIFE_DAYS: "72"
+  GLITCHTIP_MAX_TRANSACTION_EVENT_LIFE_DAYS: "72"
+  GLITCHTIP_MAX_FILE_LIFE_DAYS: "72"
   # The same 3 limits under their GlitchTip 6 names (they win over the old ones).
-  GLITCHTIP_RETENTION_DAYS: "80"
-  GLITCHTIP_EVENT_RETENTION_DAYS: "80"
-  GLITCHTIP_TRANSACTION_RETENTION_DAYS: "80"
-  GLITCHTIP_FILE_RETENTION_DAYS: "80"
-  GLITCHTIP_LOG_RETENTION_DAYS: "80"
-  GLITCHTIP_UPTIME_RETENTION_DAYS: "80"
+  GLITCHTIP_RETENTION_DAYS: "72"
+  GLITCHTIP_EVENT_RETENTION_DAYS: "72"
+  GLITCHTIP_TRANSACTION_RETENTION_DAYS: "72"
+  GLITCHTIP_FILE_RETENTION_DAYS: "72"
+  GLITCHTIP_LOG_RETENTION_DAYS: "72"
+  GLITCHTIP_UPTIME_RETENTION_DAYS: "72"
   # No open sign-up: only the superuser adds users and organizations.
   ENABLE_USER_REGISTRATION: "false"
   ENABLE_SOCIAL_APPS_USER_REGISTRATION: "false"
@@ -60,8 +64,8 @@ services:
     image: postgres:18.6@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81
     restart: unless-stopped
     command: ["postgres", "-c", "max_locks_per_transaction=512"]
-    environment:
-      POSTGRES_PASSWORD: *db_password
+    # POSTGRES_PASSWORD comes from the env file.
+    env_file: *env_file
     volumes:
       - /mnt/fast/glitchtip/postgres:/var/lib/postgresql
     mem_limit: 512m
@@ -87,6 +91,7 @@ services:
     image: glitchtip/glitchtip:6.2.6@sha256:a3d8eb1b36c1e1603d55ab32711ea3dd8115874742a781a57391a62a16e0dff6
     command: ["./bin/run-migrate.sh"]
     restart: "no"
+    env_file: *env_file
     environment: *environment
     depends_on: *depends_on
     mem_limit: 512m
@@ -94,6 +99,7 @@ services:
   web:
     image: glitchtip/glitchtip:6.2.6@sha256:a3d8eb1b36c1e1603d55ab32711ea3dd8115874742a781a57391a62a16e0dff6
     restart: unless-stopped
+    env_file: *env_file
     environment:
       <<: *environment
       SERVER_ROLE: web
@@ -124,6 +130,7 @@ services:
     # The task worker with its scheduler (GlitchTip 6 replaced Celery and beat).
     command: ["./bin/run-worker.sh"]
     restart: unless-stopped
+    env_file: *env_file
     environment:
       <<: *environment
       SERVER_ROLE: worker

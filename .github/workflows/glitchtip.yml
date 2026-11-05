@@ -1,9 +1,12 @@
 # GlitchTip runbook proof (docs/runbook/glitchtip.md, plan T857 t15): start
 # glitchtip/compose.yaml on the runner, send 2 events of 1 issue in the
-# Worker's envelope format, find them by report_id, delete 1 with the
-# runbook's script, prove that its event and tag rows are gone, and prove
-# that the other event and the issue stay. All secrets are throwaway values
-# made in the job.
+# Worker's envelope format (its own builder, src/envelope.ts), find them by
+# report_id as event id and check that no tag holds the report_id, delete 1
+# with the runbook's script, prove that no table holds its report_id
+# (pg_dump), and prove that the other event and the issue stay. Then prove the nightly cleanup with
+# scripts/glitchtip-cleanup-proof.sh: it fails with no cleanup, and passes
+# with GlitchTip's real nightly task. All secrets are throwaway values made in
+# the job, in the env file that compose.ci.yaml points to.
 name: GlitchTip runbook
 
 on:
@@ -30,9 +33,6 @@ jobs:
       contents: read
     env:
       COMPOSE: docker compose -p glitchtip-ci -f glitchtip/compose.yaml -f glitchtip/compose.ci.yaml
-      GLITCHTIP_DOMAIN: http://localhost:8000
-      GLITCHTIP_ALLOWED_HOSTS: 127.0.0.1
-      DEFAULT_FROM_EMAIL: glitchtip-ci@example.invalid
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -40,7 +40,7 @@ jobs:
 
       - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4.2.5
 
-      - name: Make throwaway secrets and data folders
+      - name: Make the throwaway env file and data folders
         run: |
           set -euo pipefail
           secret_key="$(openssl rand -hex 32)"
@@ -53,11 +53,22 @@ jobs:
           # GlitchTip runs as uid 5000 and writes uploads.
           chmod 755 "$data/postgres"
           sudo chown 5000:5000 "$data/uploads"
-          {
-            echo "SECRET_KEY=$secret_key"
-            echo "POSTGRES_PASSWORD=$db_password"
-            echo "CI_DATA=$data"
-          } >> "$GITHUB_ENV"
+          # The same 6 names as glitchtip/.env.example and the env file on
+          # the NAS, mode 0600.
+          (
+            umask 077
+            {
+              echo "SECRET_KEY=$secret_key"
+              echo "POSTGRES_PASSWORD=$db_password"
+              echo "DATABASE_PASSWORD=$db_password"
+              echo "GLITCHTIP_DOMAIN=http://localhost:8000"
+              echo "ALLOWED_HOSTS=localhost,127.0.0.1"
+              echo "DEFAULT_FROM_EMAIL=glitchtip-ci@example.invalid"
+            } > "$data/glitchtip.env"
+          )
+          [[ "$(stat -c %a "$data/glitchtip.env")" == 600 ]] || { echo "the env file is not mode 0600"; exit 1; }
+          diff <(sed -n 's/=.*//p' "$data/glitchtip.env" | sort) <(grep -v '^#' glitchtip/.env.example | sed -n 's/=$//p' | sort)
+          echo "CI_DATA=$data" >> "$GITHUB_ENV"
 
       - name: Start the stack
         run: |
@@ -113,7 +124,7 @@ jobs:
           node scripts/glitchtip-send-event.mjs "$REPORT_ID"
           node scripts/glitchtip-send-event.mjs "$KEEP_ID"
 
-      - name: Find both events by report_id, in the same issue
+      - name: Find both events by report_id as event id, in the same issue, with no report_id tag
         run: |
           set -euo pipefail
           # Prints the issue id of the event with this report_id, or fails.
@@ -127,8 +138,14 @@ jobs:
                 local rc=0
                 REPORT="$1" node -e '
                   const e = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-                  const tags = Object.fromEntries((e.tags || []).map((t) => [t.key, t.value]));
-                  if (tags.report_id !== process.env.REPORT) { console.error("no report_id tag"); process.exit(1); }
+                  const forms = [process.env.REPORT, process.env.REPORT.replaceAll("-", "")];
+                  for (const t of e.tags || []) {
+                    if (forms.some((f) => String(t.key).includes(f) || String(t.value).includes(f))) {
+                      console.error(`tag ${t.key} holds the report_id`);
+                      process.exit(1);
+                    }
+                  }
+                  if (e.eventID !== forms[1]) { console.error("the event id is not the report_id"); process.exit(1); }
                   process.stdout.write(String(e.groupID));
                 ' "$body" || rc=$?
                 rm -f "$body"
@@ -165,14 +182,72 @@ jobs:
           [[ "$status" == 404 ]] || { echo "deleted event answers $status, want 404"; exit 1; }
           rc=0
           scripts/glitchtip-delete-report.sh --check "$REPORT_ID" || rc=$?
-          [[ "$rc" == 3 ]] || { echo "the check still finds the deleted report or its tag rows (exit $rc)"; exit 1; }
+          [[ "$rc" == 3 ]] || { echo "the check still finds the deleted report (exit $rc)"; exit 1; }
           status="$(status_of "$KEEP_ID")"
           [[ "$status" == 200 ]] || { echo "kept event answers $status, want 200"; exit 1; }
           scripts/glitchtip-delete-report.sh --check "$KEEP_ID"
           status="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $CI_TOKEN" \
             "http://127.0.0.1:8000/api/0/issues/$ISSUE_ID/")"
           [[ "$status" == 200 ]] || { echo "the issue answers $status, want 200"; exit 1; }
-          echo "the deleted report and its tag rows are gone; the other report and the issue stay"
+          echo "the deleted report is gone; the other report and the issue stay"
+
+      - name: Prove that no table holds the deleted report_id
+        run: |
+          set -euo pipefail
+          # The dump never reaches the log: only counts do.
+          dump="$(mktemp)"
+          $COMPOSE exec -T postgres pg_dump -U postgres --data-only postgres > "$dump"
+          count() { { grep -o -F -- "$1" "$dump" || true; } | wc -l; }
+          deleted_hyphen="$(count "$REPORT_ID")"
+          deleted_hex="$(count "${REPORT_ID//-/}")"
+          keep_hyphen="$(count "$KEEP_ID")"
+          keep_hex="$(count "${KEEP_ID//-/}")"
+          rm -f "$dump"
+          echo "pg_dump matches: deleted report_id hyphen=$deleted_hyphen hex=$deleted_hex; kept report_id hyphen=$keep_hyphen hex=$keep_hex"
+          [[ "$deleted_hyphen" == 0 && "$deleted_hex" == 0 ]] || { echo "a table still holds the deleted report_id"; exit 1; }
+          (( keep_hyphen + keep_hex >= 1 )) || { echo "the dump holds no kept report_id: the check cannot fail"; exit 1; }
+
+      - name: Prove that the cleanup check fails when no cleanup runs
+        run: |
+          set -euo pipefail
+          rc=0
+          GLITCHTIP_WEB_CONTAINER="$($COMPOSE ps -q web)" scripts/glitchtip-cleanup-proof.sh --no-maintenance || rc=$?
+          [[ "$rc" == 3 ]] || { echo "with no cleanup the proof exits $rc, want 3"; exit 1; }
+
+      - name: Make tag rows that the cleanup proof does not own
+        run: |
+          set -euo pipefail
+          run="$(openssl rand -hex 4)"
+          echo "OWN_RUN=$run" >> "$GITHUB_ENV"
+          $COMPOSE exec -T -e GLITCHTIP_CI=true -e RUN="$run" -e ACTION=create -e ISSUE_ID="$ISSUE_ID" web \
+            ./manage.py shell < scripts/glitchtip-ci-ownership.py | grep '^OWNERSHIP '
+
+      - name: Prove that the nightly cleanup removes data older than the retention
+        run: |
+          set -euo pipefail
+          out="$(mktemp)"
+          # The run id of the rows above: the proof uses the same tag key and
+          # values, and must keep them because it did not create them.
+          GLITCHTIP_WEB_CONTAINER="$($COMPOSE ps -q web)" CLEANUP_PROOF_RUN="$OWN_RUN" \
+            scripts/glitchtip-cleanup-proof.sh | tee "$out"
+          grep -q '^COUNT: retention_days=72 ' "$out" || { echo "the running GlitchTip does not keep 72 days"; exit 1; }
+          grep -Eq '^COUNT: stage=left( [a-z_]+=0)+$' "$out" || { echo "the stage=left counts are not all 0"; exit 1; }
+
+      - name: Prove that the cleanup proof kept the tag rows it did not own
+        run: |
+          set -euo pipefail
+          ownership() {
+            $COMPOSE exec -T -e GLITCHTIP_CI=true -e RUN="$OWN_RUN" -e ACTION="$1" -e ISSUE_ID="$ISSUE_ID" web \
+              ./manage.py shell < scripts/glitchtip-ci-ownership.py | grep '^OWNERSHIP '
+          }
+          counts="$(ownership count)"
+          echo "after the proof: $counts"
+          # The old cleanup deleted the unreferenced key and value of its run.
+          [[ "$counts" == "OWNERSHIP key=1 old_value=1 new_value=1 tag_row=1" ]] ||
+            { echo "the cleanup proof deleted tag rows that it did not create"; exit 1; }
+          counts="$(ownership remove)"
+          echo "after the removal: $counts"
+          [[ "$counts" == "OWNERSHIP key=0 old_value=0 new_value=0 tag_row=0" ]] || { echo "the removal left rows"; exit 1; }
 
       - name: Stop the stack
         if: always()

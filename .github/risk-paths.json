@@ -10,6 +10,7 @@
     { "glob": "src/sql.ts", "why": "credentials-and-sensitive-data: the Analytics Engine read token" },
     { "glob": "src/report.ts", "why": "credentials-and-sensitive-data: the 1 place that reads the client address" },
     { "glob": "scripts/glitchtip-delete-report.sh", "why": "destructive-operations: deletes stored reports" },
+    { "glob": "scripts/glitchtip-cleanup-proof.sh", "why": "destructive-operations: drops partitions and deletes a temporary project" },
     { "glob": "Makefile", "why": "quality-gates: the verify, check and ci gate" },
     { "glob": "scripts/check-*.mjs", "why": "quality-gates: the corrections gate" },
     { "glob": "scripts/lib/**", "why": "quality-gates: the vendored risk-path validator" },

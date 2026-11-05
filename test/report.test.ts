@@ -104,7 +104,7 @@ describe("POST /v1/report: the forwarded request", () => {
     },
   );
 
-  it("sends an envelope with the report_id tag, event_id, a null IP and no server_name", async () => {
+  it("sends an envelope with the report_id as event_id only, a null IP and no server_name", async () => {
     const { calls } = mockFetch();
     const report = example("unit_failed");
     await call(reportRequest(JSON.stringify(report)), makeEnv());
@@ -114,7 +114,8 @@ describe("POST /v1/report: the forwarded request", () => {
     expect(item.type).toBe("event");
     expect(item.length).toBe(new TextEncoder().encode(payload).byteLength);
     expect(event.event_id).toBe(eventId);
-    expect((event.tags as Record<string, string>).report_id).toBe(report.report_id);
+    expect(event.tags).not.toHaveProperty("report_id");
+    expect(JSON.stringify(event.tags)).not.toContain(report.report_id);
     expect(event.user).toEqual({ ip_address: null });
     expect(event).not.toHaveProperty("server_name");
     expect(event).not.toHaveProperty("request");

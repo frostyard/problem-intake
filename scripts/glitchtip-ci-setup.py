@@ -18,9 +18,9 @@ if os.environ.get("GLITCHTIP_CI") != "true":
     raise SystemExit("refusing to run outside the GlitchTip CI job")
 
 # The settings under test, read back from the running app.
-assert settings.GLITCHTIP_EVENT_RETENTION_DAYS == 80, settings.GLITCHTIP_EVENT_RETENTION_DAYS
-assert settings.GLITCHTIP_TRANSACTION_RETENTION_DAYS == 80, settings.GLITCHTIP_TRANSACTION_RETENTION_DAYS
-assert settings.GLITCHTIP_FILE_RETENTION_DAYS == 80, settings.GLITCHTIP_FILE_RETENTION_DAYS
+assert settings.GLITCHTIP_EVENT_RETENTION_DAYS == 72, settings.GLITCHTIP_EVENT_RETENTION_DAYS
+assert settings.GLITCHTIP_TRANSACTION_RETENTION_DAYS == 72, settings.GLITCHTIP_TRANSACTION_RETENTION_DAYS
+assert settings.GLITCHTIP_FILE_RETENTION_DAYS == 72, settings.GLITCHTIP_FILE_RETENTION_DAYS
 assert settings.ENABLE_USER_REGISTRATION is False
 assert settings.ENABLE_ORGANIZATION_CREATION is False
 

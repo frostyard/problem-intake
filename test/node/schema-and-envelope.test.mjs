@@ -47,7 +47,8 @@ test("Node can run the envelope builder that the GlitchTip CI job uses", () => {
   assert.equal(lines.length, 4);
   const event = JSON.parse(lines[2]);
   assert.deepEqual(event, buildEvent(doc));
-  assert.equal(event.tags.report_id, doc.report_id);
+  assert.equal(event.tags.report_id, undefined, "no report_id tag (ADR-0005)");
+  assert.ok(!JSON.stringify(event.tags).includes(doc.report_id));
   assert.equal(event.event_id, doc.report_id.replaceAll("-", ""));
   assert.deepEqual(event.user, { ip_address: null });
 });

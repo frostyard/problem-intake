@@ -64,8 +64,8 @@ The health document:
   `Content-Type: application/x-sentry-envelope` and
   `X-Sentry-Auth: Sentry sentry_version=7, sentry_key=<DSN public key>, sentry_client=frostyard-problem-intake/<version>`.
 - The forwarded envelope holds 1 event: `event_id` = `report_id` without
-  dashes, tags `report_id`, `week`, `image`, `image_version`, `secure`,
-  `kind`, `client`, `client_name` and each scalar `detail` field (`version`
+  dashes (no tag key or value holds the `report_id`), tags `week`, `image`,
+  `image_version`, `secure`, `kind`, `client`, `client_name` and each scalar `detail` field (`version`
   becomes `feature_version`, `count` becomes `count_bucket`),
   `extra.detail`, `user.ip_address` null, and no `server_name`, `request`,
   `contexts` or `timestamp`.
@@ -73,8 +73,10 @@ The health document:
 
 ## References
 
-- Rationale: [ADR-0003](../adr/0003-intake-worker-validates-strips-and-forwards.md)
+- Rationale: [ADR-0003](../adr/0003-intake-worker-validates-strips-and-forwards.md),
+  [ADR-0005](../adr/0005-the-worker-sends-no-report-id-tag.md)
 - Context: [design/intake.md](../design/intake.md)
 - Schema: frostyard/core
   [problem-report.md](https://github.com/frostyard/core/blob/main/docs/specs/problem-report.md)
-- Tests: `test/report.test.ts`, `test/units.test.ts`, `test/jobs.test.ts`
+- Tests: `test/report.test.ts`, `test/units.test.ts`, `test/jobs.test.ts`,
+  `test/envelope-report-id.test.ts`

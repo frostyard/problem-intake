@@ -71,6 +71,7 @@ test("the key files are risk paths", () => {
     "Makefile",
     "scripts/check-corrections.mjs",
     "scripts/glitchtip-delete-report.sh",
+    "scripts/glitchtip-cleanup-proof.sh",
   ]) {
     assert.ok(list.paths.some((p) => matchGlob(p.glob, path)), `${path} is not a risk path`);
   }
