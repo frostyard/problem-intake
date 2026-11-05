@@ -212,3 +212,138 @@ describe("suppressTable", () => {
     expect(suppressedSomething).toBeGreaterThan(1500);
   });
 });
+
+// ---- Exact integer check (the bound "every listed value is >= 1") ---------
+//
+// Enumerate every integer assignment >= 1 of the suppressed values that is
+// consistent with the published values and the 2 levels of equations, and
+// return the suppressed values that have only 1 possible value. Upper bounds:
+// with a published grand total the enumeration is exact; with a suppressed
+// grand total the totals have no upper bound, so the window stops at the true
+// total + 2 (a value with 2 possible values inside the window has 2 in all).
+
+// Every way to write `sum` as `parts` integers >= 1.
+function* compositions(sum: number, parts: number): Generator<number[]> {
+  if (parts === 0) {
+    if (sum === 0) yield [];
+    return;
+  }
+  if (parts === 1) {
+    if (sum >= 1) yield [sum];
+    return;
+  }
+  for (let first = 1; first <= sum - (parts - 1); first++) {
+    for (const rest of compositions(sum - first, parts - 1)) yield [first, ...rest];
+  }
+}
+
+function uniqueByEnumeration(raw: RawTable, published: PublishedTable): string[] {
+  const names = Object.keys(published.groups);
+  const info = names.map((g) => {
+    const group = published.groups[g];
+    const hiddenCells = Object.keys(group.cells).filter((c) => group.cells[c] === null);
+    const shown = Object.values(group.cells).reduce<number>((s, v) => s + (v ?? 0), 0);
+    const trueTotal = Object.values(raw[g]).reduce((s, v) => s + v, 0);
+    return { g, group, hiddenCells, shown, trueTotal, lower: shown + hiddenCells.length };
+  });
+  // For each group: total -> the possible values of each suppressed cell.
+  const options = info.map(({ group, hiddenCells, shown, trueTotal, lower }, i) => {
+    let lo = lower;
+    let hi: number;
+    if (group.total !== null) {
+      lo = hi = group.total;
+    } else if (published.total !== null) {
+      const others = info.reduce((s, o, j) => (j === i ? s : s + (o.group.total ?? o.lower)), 0);
+      hi = published.total - others;
+    } else {
+      hi = trueTotal + 2;
+    }
+    const byTotal = new Map<number, Map<string, Set<number>>>();
+    for (let t = lo; t <= hi; t++) {
+      const cells = new Map<string, Set<number>>(hiddenCells.map((c) => [c, new Set<number>()]));
+      let any = false;
+      for (const values of compositions(t - shown, hiddenCells.length)) {
+        any = true;
+        values.forEach((v, k) => cells.get(hiddenCells[k])?.add(v));
+      }
+      if (any) byTotal.set(t, cells);
+    }
+    return byTotal;
+  });
+  const seen = new Map<string, Set<number>>();
+  const note = (name: string, value: number) => {
+    if (!seen.has(name)) seen.set(name, new Set());
+    seen.get(name)?.add(value);
+  };
+  const choose = (i: number, totals: number[]) => {
+    if (i === info.length) {
+      const sum = totals.reduce((s, t) => s + t, 0);
+      if (published.total !== null && sum !== published.total) return;
+      if (published.total === null) note("G", sum);
+      totals.forEach((t, j) => {
+        if (info[j].group.total === null) note(`T:${info[j].g}`, t);
+        for (const [c, values] of options[j].get(t) ?? []) for (const v of values) note(`C:${info[j].g}:${c}`, v);
+      });
+      return;
+    }
+    for (const t of options[i].keys()) choose(i + 1, [...totals, t]);
+  };
+  choose(0, []);
+  const hidden: string[] = [];
+  if (published.total === null) hidden.push("G");
+  for (const { g, group, hiddenCells } of info) {
+    if (group.total === null) hidden.push(`T:${g}`);
+    for (const c of hiddenCells) hidden.push(`C:${g}:${c}`);
+  }
+  return hidden.filter((name) => (seen.get(name)?.size ?? 0) < 2);
+}
+
+describe("the bound rule (every listed value is an integer >= 1)", () => {
+  it("the integer checker finds a value that the lower bound gives back", () => {
+    // y + z = 2 and each is >= 1, so y = z = 1.
+    const naive: PublishedTable = { total: 27, groups: { A: { total: 7, cells: { x: 5, y: null, z: null } }, B: { total: 20, cells: { x: 20 } } } };
+    expect(uniqueByEnumeration({ A: { x: 5, y: 1, z: 1 }, B: { x: 20 } }, naive).sort()).toEqual(["C:A:y", "C:A:z"]);
+  });
+
+  it("hides 1 more cell when the suppressed cells of a group can only be 1", () => {
+    const raw = { A: { x: 5, y: 1, z: 1 }, B: { x: 20 } };
+    const published = assertSafe(raw);
+    expect(uniqueByEnumeration(raw, published)).toEqual([]);
+    expect(published.groups.A).toEqual({ total: 7, cells: { x: null, y: null, z: null } });
+  });
+
+  it("hides 1 more total when the suppressed totals sit at their lower bound", () => {
+    // The totals of A and B are 1 and hidden; with G = 42 and C = 40 shown,
+    // A + B = 2 and each is >= 1, so A = B = 1 (and so are their cells).
+    const naive: PublishedTable = {
+      total: 42,
+      groups: { A: { total: null, cells: { x: null } }, B: { total: null, cells: { y: null } }, C: { total: 40, cells: { w: 40 } } },
+    };
+    const raw = { A: { x: 1 }, B: { y: 1 }, C: { w: 40 } };
+    expect(uniqueByEnumeration(raw, naive).sort()).toEqual(["C:A:x", "C:B:y", "T:A", "T:B"]);
+    const published = assertSafe(raw);
+    expect(uniqueByEnumeration(raw, published)).toEqual([]);
+    expect(published.groups.C).toEqual({ total: null, cells: { w: null } });
+    expect(published.total).toBe(42);
+  });
+
+  it("leaves no suppressed value with only 1 possible integer value on 2000 seeded small tables", () => {
+    const next = rng(0xb0d5);
+    let suppressedSomething = 0;
+    for (let t = 0; t < 2000; t++) {
+      const raw: RawTable = {};
+      const groups = 1 + Math.floor(next() * 3);
+      for (let g = 0; g < groups; g++) {
+        const cells: Record<string, number> = {};
+        const count = 1 + Math.floor(next() * 3);
+        for (let c = 0; c < count; c++) cells[`c${c}`] = next() < 0.5 ? 1 + Math.floor(next() * 2) : 1 + Math.floor(next() * 9);
+        raw[`g${g}`] = cells;
+      }
+      const published = assertSafe(raw);
+      const unique = uniqueByEnumeration(raw, published);
+      expect(unique, JSON.stringify(raw)).toEqual([]);
+      if (JSON.stringify(published).includes("null")) suppressedSomething += 1;
+    }
+    expect(suppressedSomething).toBeGreaterThan(1000);
+  });
+});

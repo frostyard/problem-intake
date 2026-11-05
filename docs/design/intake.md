@@ -58,7 +58,8 @@ cron Monday ──► SQL API ──► KV aggregates/<week>.json, aggregates/in
 - **Aggregates.** The Monday cron (`23 3 * * 1`, UTC) reads the previous ISO
   week with `SUM(_sample_interval)`, validates every row against the schema's
   enums and patterns, builds 3 independent tables and suppresses small and
-  complementary cells ([specs/stats.md](../specs/stats.md)).
+  complementary cells, also against the bound that every listed value is 1
+  or more ([specs/stats.md](../specs/stats.md), rules 4 to 7).
 
 ## Known limits
 

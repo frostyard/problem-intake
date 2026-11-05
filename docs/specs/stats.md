@@ -70,11 +70,31 @@ sorted, no duplicates).
    so 1 more value of that equation becomes `null`: the smallest published
    cell (or group total; ties by key), or the equation's total when no part is
    left. This repeats over both levels until nothing changes.
-6. The 3 tables share no counts (`app_problem` is only in `app_problems`,
+6. **Bound rule.** A reader also knows that every listed value is an integer
+   of 1 or more (zero cells are absent). The slack of a set of suppressed
+   values is the sum of (value − 1) over them. When a group total is
+   published and the slack of its suppressed cells is 0 (each is exactly 1),
+   1 more part of that group becomes `null`: the smallest published cell,
+   else the group total. When the table total is published and the slack of
+   the suppressed cells of all groups with a `null` total is 0 (each `null`
+   total sits at its lower bound: its published cells + 1 for each `null`
+   cell), the smallest published group total becomes `null`, else the table
+   total. Rules 5 and 6 repeat together until nothing changes.
+7. **Why rules 5 and 6 suffice.** At the fixed point, every `null` value has
+   at least 2 possible integer values >= 1: a group with a published total
+   has at least 2 `null` cells whose sum is above their count, and those
+   cells occur in no other equation; a `null` group total has at least 1
+   `null` cell, so it can take any value from its lower bound up; with a
+   published table total, at least 2 group totals are `null` and their sum is
+   above the sum of their lower bounds, so each can be its lower bound or 1
+   more; with a `null` table total, a `null` group total has no upper bound.
+8. The 3 tables share no counts (`app_problem` is only in `app_problems`,
    `count` only in `installs`), so no table can be subtracted from another.
-7. No published number is from 1 to 4. No suppressed value is determined by
+9. No published number is from 1 to 4. No suppressed value is determined by
    the published values: `test/suppress.test.ts` solves the linear system
-   exactly over the rationals on fixed and on 3000 seeded random tables.
+   exactly over the rationals on fixed and on 3000 seeded random tables, and
+   enumerates every integer assignment >= 1 on fixed and on 2000 seeded small
+   tables (up to 3 groups of up to 3 cells, values 1 to 9).
 
 ## References
 

@@ -9,6 +9,29 @@
 // smallest published cell (or group total), and the equation's total only
 // when nothing else is left. This repeats over both levels until nothing
 // changes. Zero cells are absent.
+//
+// Bound rule. A reader also knows that every listed value is an integer of 1
+// or more. The slack of a set of suppressed values is the sum of (value - 1)
+// over them. When a group total is published and the slack of its suppressed
+// cells is 0, every suppressed cell is exactly 1; and when the grand total is
+// published and the slack of the suppressed cells of all suppressed-total
+// groups is 0, every suppressed total sits at its lower bound (published
+// cells + 1 for each suppressed cell). In both cases 1 more part of that
+// equation is suppressed (the smallest published part, else the total), and
+// the loop goes on to a fixed point.
+//
+// Why this is sufficient (docs/specs/stats.md, rule 7). At the fixed point:
+// - A group with a published total and k suppressed cells has k >= 2 (linear
+//   rule) and a cell sum S >= k + 1 (bound rule). Its cells occur in no other
+//   equation, so each can be 1 or 2 with the others >= 1.
+// - A group with a suppressed total T has at least 1 suppressed cell (linear
+//   rule), so any T >= L = published cells + suppressed cells is possible.
+// - With a published grand total, at least 2 totals are suppressed (linear
+//   rule) and their sum R >= (sum of L) + 1 (bound rule): each total can be L
+//   or L + 1, the others take the rest, and so each of its cells can be 1 or 2.
+// - With a suppressed grand total, at least 1 group total is suppressed
+//   (linear rule) and has no upper bound, so it and the grand total can move.
+// So every suppressed value has at least 2 possible integer values.
 
 export const MIN_CELL = 5;
 
@@ -53,6 +76,41 @@ function protect(total: Item, parts: Item[]): boolean {
   return true;
 }
 
+// The sum of (value - 1) over the suppressed items: 0 means that a reader
+// who knows their sum knows that each one is 1.
+function slack(items: Item[]): number {
+  return items.filter((item) => item.suppressed).reduce((sum, item) => sum + item.value - 1, 0);
+}
+
+// Suppress 1 more part of an equation (the smallest published part), or its
+// total when no part is published.
+function widen(total: Item, parts: Item[]): boolean {
+  const pick = parts.filter((item) => !item.suppressed).sort(byValueThenKey)[0] ?? total;
+  if (pick.suppressed) return false;
+  pick.suppressed = true;
+  return true;
+}
+
+// The bound rule for a group with a published total.
+function protectGroupBound(total: Item, cells: Item[]): boolean {
+  if (total.suppressed || !cells.some((cell) => cell.suppressed)) return false;
+  return slack(cells) === 0 && widen(total, cells);
+}
+
+// The bound rule for a published grand total.
+function protectGrandBound(grand: Item, groups: { total: Item; cells: Item[] }[]): boolean {
+  const hidden = groups.filter((group) => group.total.suppressed);
+  if (grand.suppressed || hidden.length === 0) return false;
+  const total = hidden.reduce((sum, group) => sum + slack(group.cells), 0);
+  return (
+    total === 0 &&
+    widen(
+      grand,
+      groups.map((group) => group.total),
+    )
+  );
+}
+
 export function suppressTable(raw: RawTable): PublishedTable {
   const groupKeys = Object.keys(raw).sort();
   const groups: { key: string; total: Item; cells: Item[] }[] = [];
@@ -82,6 +140,10 @@ export function suppressTable(raw: RawTable): PublishedTable {
     ) {
       changed = true;
     }
+    for (const group of groups) {
+      if (protectGroupBound(group.total, group.cells)) changed = true;
+    }
+    if (protectGrandBound(grand, groups)) changed = true;
   }
 
   const published: PublishedTable = { total: grand.suppressed ? null : grand.value, groups: {} };
