@@ -13,7 +13,9 @@
 # tag rows and its issue stay. At the end it deletes the temporary project
 # with GlitchTip's delete_project task, removes what is left of the test
 # data, and checks that no test row and no partition it made is left. It
-# prints counts and PASS or FAIL only: never a DSN, a key or a secret.
+# prints counts and PASS or FAIL only: never a DSN, a key or a secret. Of the
+# container's output it shows only lines of a strict shape (numbers, lowercase
+# words with underscores, or an exception type), and never its stderr.
 #
 # Usage: scripts/glitchtip-cleanup-proof.sh [--no-maintenance]
 #   --no-maintenance  test only: skip the nightly task; the proof must then
@@ -44,7 +46,7 @@ usage() {
 
 mode=proof
 if [[ "${1:-}" == "--no-maintenance" ]]; then
-  mode=no-maintenance
+  mode=no_maintenance
   shift
 fi
 [[ $# -eq 0 ]] || usage
@@ -59,11 +61,9 @@ fi
 container="${GLITCHTIP_WEB_CONTAINER:-ix-glitchtip-web-1}"
 read -r -a docker <<<"${DOCKER:-docker}"
 
-# GlitchTip's own log lines go to this file, not to the screen.
-errors="$(mktemp)"
-trap 'rm -f "$errors"' EXIT
-
-output="$("${docker[@]}" exec -i -e "MODE=$mode" -e "ORG=$org" "$container" ./manage.py shell 2>"$errors" <<'PY'
+# GlitchTip's own log lines (stderr) never reach the screen: they can hold
+# any text.
+output="$("${docker[@]}" exec -i -e "MODE=$mode" -e "ORG=$org" "$container" ./manage.py shell 2>/dev/null <<'PY'
 import json
 import os
 import secrets
@@ -92,16 +92,20 @@ from glitchtip.partition_manager import UUID7Helper, PartitionManager
 MODE = os.environ["MODE"]
 ORG = os.environ.get("ORG", "")
 POLL_SECONDS = 180
-TAG = "cleanup_proof"
-
 run = secrets.token_hex(4)
+# A tag key of this run only: the cleanup never touches another key.
+TAG = f"cleanup_proof_{run}"
 values = {"old": f"cleanup-proof-{run}-old", "new": f"cleanup-proof-{run}-new"}
 retention = int(settings.GLITCHTIP_EVENT_RETENTION_DAYS)
 shift = timedelta(days=retention + 20)
 
 
 def out(kind, **counts):
+    # Only numbers, fixed words and exception type names: never a message.
     print(kind + " " + " ".join(f"{k}={v}" for k, v in counts.items()), flush=True)
+
+
+stage = "setup"
 
 
 class Stop(Exception):
@@ -112,13 +116,16 @@ class Stop(Exception):
 out("COUNT", retention_days=retention, backdate_days=shift.days, mode=MODE)
 org = (Organization.objects.filter(slug=ORG) if ORG else Organization.objects.order_by("id")).first()
 if org is None:
-    out("ERROR", reason="no-organization")
+    out("ERROR", stage="setup", type="NoOrganization")
     out("STATUS", result="ERROR")
     raise SystemExit
 
 manager = PartitionManager()
 created_partitions = []
 issue_ids = set()
+# The tag keys and values that exist before the run are never deleted.
+known_keys = set(TagKey.objects.filter(key=TAG).values_list("id", flat=True))
+known_values = set(TagValue.objects.filter(value__in=list(values.values())).values_list("id", flat=True))
 project = Project.objects.create(name=f"cleanup-proof-{run}", organization=org)
 status = "ERROR"
 
@@ -149,6 +156,7 @@ def stored(event):
 
 
 try:
+    stage = "send"
     # 1. Send 2 events with 2 fingerprints (2 issues). The key stays in
     # this process: it is never printed.
     event_ids = {k: uuid.uuid4() for k in values}
@@ -178,6 +186,7 @@ try:
                 raise RuntimeError(f"store answered {response.status}")
     del key
 
+    stage = "wait"
     # 2. Wait until the worker stored both events, their tag rows and
     # aggregates (a bounded poll).
     deadline = time.monotonic() + POLL_SECONDS
@@ -197,6 +206,7 @@ try:
     if old["issue_id"] == new["issue_id"]:
         raise RuntimeError("the 2 test events are in 1 issue")
 
+    stage = "backdate"
     # 3. Backdate the old event, its tag and aggregate rows, and its issue.
     # The event id is a UUIDv7 that holds the received time and is the RANGE
     # partition key; an UPDATE of the key moves the row to the old partition.
@@ -249,11 +259,13 @@ try:
     if not (before["old_event"] == 1 and before["old_tag_rows"] and before["old_issue"] == 1):
         raise RuntimeError("the backdate did not take")
 
+    stage = "maintenance"
     # 4. The real nightly task.
-    if MODE != "no-maintenance":
+    if MODE != "no_maintenance":
         from glitchtip.tasks import perform_maintenance
 
         perform_maintenance.call()
+    stage = "check"
     after = counts()
     out("COUNT", stage="after", **after)
     gone = after["old_event"] == 0 and after["old_tag_rows"] == 0 and after["old_aggregate_rows"] == 0 and after["old_issue"] == 0
@@ -262,8 +274,8 @@ try:
 except Stop as stop:
     status = stop.status
 except Exception as error:  # noqa: BLE001 - report and clean up
-    # The message names the step; no value of this script is a secret.
-    out("ERROR", type=type(error).__name__, message=" ".join(str(error).split())[:300])
+    # The stage and the type only: a message can hold any text.
+    out("ERROR", stage=stage, type=type(error).__name__)
     status = "ERROR"
 finally:
     # 5. Delete the temporary project with GlitchTip's own task, then any
@@ -285,11 +297,18 @@ finally:
         Issue.objects.filter(id__in=ids)._raw_delete("default")
         for leftover in Project.objects.filter(id=project.id):
             leftover.force_delete()
-    for value in values.values():
-        if not IssueTag.objects.filter(tag_value__value=value).exists():
-            TagValue.objects.filter(value=value).delete()
-    if not IssueTag.objects.filter(tag_key__key=TAG).exists():
-        TagKey.objects.filter(key=TAG).delete()
+    # Only the tag keys and values that this run created, and only when no
+    # tag row uses them.
+    run_keys = set(TagKey.objects.filter(key=TAG).values_list("id", flat=True)) - known_keys
+    run_values = (
+        set(TagValue.objects.filter(value__in=list(values.values())).values_list("id", flat=True)) - known_values
+    )
+    for key_id in run_keys:
+        if not IssueTag.objects.filter(tag_key_id=key_id).exists():
+            TagKey.objects.filter(id=key_id).delete()
+    for value_id in run_values:
+        if not IssueTag.objects.filter(tag_value_id=value_id).exists():
+            TagValue.objects.filter(id=value_id).delete()
     with connection.cursor() as cursor:
         for name in created_partitions:
             if manager.table_exists(name):
@@ -308,8 +327,8 @@ finally:
         "index_rows": IssueIndex.objects.filter(organization_id=org.id, issue_id__in=ids).count(),
         "hashes": IssueHash.objects.filter(project_id=project.id).count(),
         "hourly_rows": IssueEventProjectHourlyStatistic.objects.filter(project_id=project.id).count(),
-        "tag_values": TagValue.objects.filter(value__in=list(values.values())).count(),
-        "tag_keys": TagKey.objects.filter(key=TAG).count(),
+        "tag_values": TagValue.objects.filter(id__in=list(run_values)).count(),
+        "tag_keys": TagKey.objects.filter(id__in=list(run_keys)).count(),
         "partitions": sum(1 for name in created_partitions if manager.table_exists(name)),
     }
     out("COUNT", stage="left", **left)
@@ -319,9 +338,11 @@ finally:
 PY
 )" || true
 
-# Show only the script's own lines: counts, errors and the result.
-grep -E '^(COUNT|ERROR) ' <<<"$output" | sed -E 's/^(COUNT|ERROR) /\1: /' || true
-result="$(sed -n 's/^STATUS result=//p' <<<"$output" | tail -n 1)"
+# Show only lines of the script's strict shape: each value is a number, a
+# lowercase word with underscores, or an exception type. Drop every other line.
+value='([0-9]+|[a-z_]+|[A-Z][A-Za-z]*)'
+grep -E "^(COUNT|ERROR)( [a-z_]+=$value)+\$" <<<"$output" | sed -E 's/^(COUNT|ERROR) /\1: /' || true
+result="$(sed -En 's/^STATUS result=(PASS|FAIL|LEFTOVER|TIMEOUT|ERROR)$/\1/p' <<<"$output" | tail -n 1)"
 case "$result" in
   PASS)
     echo "PASS: the nightly task removed the old test data, kept the recent test data, and no test data is left"
@@ -345,7 +366,6 @@ case "$result" in
     ;;
   *)
     echo "error: the proof could not run (no result from GlitchTip)" >&2
-    if [[ "${GLITCHTIP_PROOF_DEBUG:-}" == 1 ]]; then tail -n 40 "$errors" >&2; fi
     exit 1
     ;;
 esac
