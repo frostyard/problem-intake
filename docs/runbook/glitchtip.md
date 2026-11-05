@@ -38,29 +38,42 @@ pinned by tag and digest. No value in this runbook is a secret.
      default is `*`, every host;
    - `DEFAULT_FROM_EMAIL`: a sender address.
 
+   This snippet is for the first install only, with an empty
+   `/mnt/fast/glitchtip/postgres`. **Never run it on an existing install**:
+   `POSTGRES_PASSWORD` only sets the password when Postgres initializes a new
+   data folder, so a new value in the env file locks GlitchTip out of the
+   existing database. To change a value later, follow
+   [Change a secret](#change-a-secret). The snippet stops with a message when
+   the env file exists.
+
    Brian writes it in System → Shell after `sudo -i` (as root). The random
    values are made by `openssl rand -hex` inside the file write, so no value
    is shown on screen; Brian types the 3 host values at the prompts:
 
    ```sh
-   install -d -o 0 -g 0 -m 0700 /mnt/fast/glitchtip/secrets
-   read -r -p "GLITCHTIP_DOMAIN (URL from Teg): " domain
-   read -r -p "LAN UI host name: " lan_host
-   read -r -p "DEFAULT_FROM_EMAIL: " from_email
-   (
-     umask 077
-     db_password="$(openssl rand -hex 24)"
-     {
-       echo "SECRET_KEY=$(openssl rand -hex 32)"
-       echo "POSTGRES_PASSWORD=$db_password"
-       echo "DATABASE_PASSWORD=$db_password"
-       echo "GLITCHTIP_DOMAIN=$domain"
-       echo "ALLOWED_HOSTS=localhost,intake.ketelsen.cloud,$lan_host"
-       echo "DEFAULT_FROM_EMAIL=$from_email"
-     } > /mnt/fast/glitchtip/secrets/glitchtip.env
-   )
-   chown root:root /mnt/fast/glitchtip/secrets/glitchtip.env
-   chmod 0600 /mnt/fast/glitchtip/secrets/glitchtip.env
+   env_file=/mnt/fast/glitchtip/secrets/glitchtip.env
+   if [[ -e "$env_file" ]]; then
+     echo "STOP: $env_file exists. Never run the install snippet on an existing install; see Change a secret." >&2
+   else
+     install -d -o 0 -g 0 -m 0700 /mnt/fast/glitchtip/secrets
+     read -r -p "GLITCHTIP_DOMAIN (URL from Teg): " domain
+     read -r -p "LAN UI host name: " lan_host
+     read -r -p "DEFAULT_FROM_EMAIL: " from_email
+     (
+       umask 077
+       db_password="$(openssl rand -hex 24)"
+       {
+         echo "SECRET_KEY=$(openssl rand -hex 32)"
+         echo "POSTGRES_PASSWORD=$db_password"
+         echo "DATABASE_PASSWORD=$db_password"
+         echo "GLITCHTIP_DOMAIN=$domain"
+         echo "ALLOWED_HOSTS=localhost,intake.ketelsen.cloud,$lan_host"
+         echo "DEFAULT_FROM_EMAIL=$from_email"
+       } > "$env_file"
+     )
+     chown root:root "$env_file"
+     chmod 0600 "$env_file"
+   fi
    ```
 
    Check it with no value on screen:
@@ -86,8 +99,58 @@ pinned by tag and digest. No value in this runbook is a secret.
 6. **Cleanup proof.** Run the cleanup proof once before go-live
    ([Retention](#retention)).
 
-To change a secret later, edit the env file the same way and redeploy the
-app; the Compose file does not change.
+## Change a secret
+
+The Compose file never changes for this; only the env file does. Work in
+System → Shell after `sudo -i` (as root). No value is shown on screen. After
+each change, redeploy the app: Apps → `glitchtip` → Stop, then Start (new
+containers read the env file). Then check: the app RUNNING, `migrate`
+exited 0, `curl -fsS http://10.0.1.100:30053/_health/` answers `ok`. While
+GlitchTip is down, the Worker answers 502 and senders retry the next day.
+
+This helper replaces 1 or more lines of the env file without showing a value
+(paste it first):
+
+```sh
+env_file=/mnt/fast/glitchtip/secrets/glitchtip.env
+# set_env NAME FILE: NAME= takes the content of FILE (1 line).
+set_env() {
+  local tmp
+  tmp="$(mktemp /mnt/fast/glitchtip/secrets/.glitchtip.env.XXXXXX)"
+  grep -v "^$1=" "$env_file" > "$tmp"
+  printf '%s=%s\n' "$1" "$(cat "$2")" >> "$tmp"
+  chmod 0600 "$tmp"
+  mv "$tmp" "$env_file"
+}
+```
+
+- **Database password.** Postgres keeps the password in its data folder;
+  `POSTGRES_PASSWORD` in the env file does not change it. Change it in
+  Postgres first, then in the env file, then redeploy:
+
+  ```sh
+  umask 077
+  new="$(mktemp)"
+  openssl rand -hex 24 > "$new"
+  # 1. In Postgres (the value goes through stdin, not the command line).
+  { printf "\\set pw '%s'\n" "$(cat "$new")"; echo "ALTER ROLE postgres PASSWORD :'pw';"; } |
+    docker exec -i ix-glitchtip-postgres-1 psql -q -v ON_ERROR_STOP=1 -U postgres
+  # 2. Both names in the env file get the same value.
+  set_env POSTGRES_PASSWORD "$new"
+  set_env DATABASE_PASSWORD "$new"
+  rm -f "$new"
+  ```
+
+  Then redeploy. Between step 1 and the redeploy, new GlitchTip database
+  connections fail.
+- **`SECRET_KEY`.** `openssl rand -hex 32 > "$new"` (in a `mktemp` file
+  with `umask 077`), `set_env SECRET_KEY "$new"`, `rm -f "$new"`, redeploy.
+  A new `SECRET_KEY` logs out every GlitchTip user.
+- **A host value** (`GLITCHTIP_DOMAIN`, `ALLOWED_HOSTS`,
+  `DEFAULT_FROM_EMAIL`): edit the line with an editor, then redeploy.
+  `ALLOWED_HOSTS` keeps `localhost,` first.
+
+Check the env file after any change, as in step 3 of [Install](#install).
 
 ## Users, organization, projects and DSNs
 
