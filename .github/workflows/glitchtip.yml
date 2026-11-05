@@ -214,12 +214,40 @@ jobs:
           GLITCHTIP_WEB_CONTAINER="$($COMPOSE ps -q web)" scripts/glitchtip-cleanup-proof.sh --no-maintenance || rc=$?
           [[ "$rc" == 3 ]] || { echo "with no cleanup the proof exits $rc, want 3"; exit 1; }
 
+      - name: Make tag rows that the cleanup proof does not own
+        run: |
+          set -euo pipefail
+          run="$(openssl rand -hex 4)"
+          echo "OWN_RUN=$run" >> "$GITHUB_ENV"
+          $COMPOSE exec -T -e GLITCHTIP_CI=true -e RUN="$run" -e ACTION=create -e ISSUE_ID="$ISSUE_ID" web \
+            ./manage.py shell < scripts/glitchtip-ci-ownership.py | grep '^OWNERSHIP '
+
       - name: Prove that the nightly cleanup removes data older than the retention
         run: |
           set -euo pipefail
           out="$(mktemp)"
-          GLITCHTIP_WEB_CONTAINER="$($COMPOSE ps -q web)" scripts/glitchtip-cleanup-proof.sh | tee "$out"
+          # The run id of the rows above: the proof uses the same tag key and
+          # values, and must keep them because it did not create them.
+          GLITCHTIP_WEB_CONTAINER="$($COMPOSE ps -q web)" CLEANUP_PROOF_RUN="$OWN_RUN" \
+            scripts/glitchtip-cleanup-proof.sh | tee "$out"
           grep -q '^COUNT: retention_days=72 ' "$out" || { echo "the running GlitchTip does not keep 72 days"; exit 1; }
+          grep -Eq '^COUNT: stage=left( [a-z_]+=0)+$' "$out" || { echo "the stage=left counts are not all 0"; exit 1; }
+
+      - name: Prove that the cleanup proof kept the tag rows it did not own
+        run: |
+          set -euo pipefail
+          ownership() {
+            $COMPOSE exec -T -e GLITCHTIP_CI=true -e RUN="$OWN_RUN" -e ACTION="$1" -e ISSUE_ID="$ISSUE_ID" web \
+              ./manage.py shell < scripts/glitchtip-ci-ownership.py | grep '^OWNERSHIP '
+          }
+          counts="$(ownership count)"
+          echo "after the proof: $counts"
+          # The old cleanup deleted the unreferenced key and value of its run.
+          [[ "$counts" == "OWNERSHIP key=1 old_value=1 new_value=1 tag_row=1" ]] ||
+            { echo "the cleanup proof deleted tag rows that it did not create"; exit 1; }
+          counts="$(ownership remove)"
+          echo "after the removal: $counts"
+          [[ "$counts" == "OWNERSHIP key=0 old_value=0 new_value=0 tag_row=0" ]] || { echo "the removal left rows"; exit 1; }
 
       - name: Stop the stack
         if: always()
