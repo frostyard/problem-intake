@@ -95,7 +95,8 @@ pinned by tag and digest. No value in this runbook is a secret.
    Valkey are not published. `web`, `postgres` and `valkey` are healthy.
    `migrate` runs the migrations and exits 0 by design: the app must show
    RUNNING, not CRASHED, with 1 container (`migrate`) exited 0. From the LAN:
-   `curl -fsS http://10.0.1.100:30053/_health/` answers `ok`.
+   `curl -fsS -H 'Host: localhost' http://10.0.1.100:30053/_health/` answers
+   `ok` (see [Health check](#health-check)).
 6. **Cleanup proof.** Run the cleanup proof once before go-live
    ([Retention](#retention)).
 
@@ -105,7 +106,8 @@ The Compose file never changes for this; only the env file does. Work in
 System → Shell after `sudo -i` (as root). No value is shown on screen. After
 each change, redeploy the app: Apps → `glitchtip` → Stop, then Start (new
 containers read the env file). Then check: the app RUNNING, `migrate`
-exited 0, `curl -fsS http://10.0.1.100:30053/_health/` answers `ok`. While
+exited 0, `curl -fsS -H 'Host: localhost' http://10.0.1.100:30053/_health/`
+answers `ok`. While
 GlitchTip is down, the Worker answers 502 and senders retry the next day.
 
 This helper replaces 1 or more lines of the env file without showing a value
@@ -166,10 +168,25 @@ Open sign-up and organization creation are off
 3. Create the project `system` (all system kinds) and 1 project for each app
    ID that gets its own project, named by the app ID (for example
    `org.frostyard.ChairLift`). An app with no project goes to `system`.
-4. In each project's settings, turn on **Scrub IP addresses**. GlitchTip
-   6.2.6 has no setting to stop it from reading an address from
-   `X-Forwarded-For`; caddy strips that header (t17), and the scrub setting is
-   the second guard.
+4. Check that each project scrubs IP addresses. The GlitchTip 6.2.6 UI has
+   no setting for it: the project field `scrub_ip_addresses` has the default
+   `True` (`apps/projects/models.py`), so every new project scrubs. Check it in
+   the TrueNAS shell of the `web` container:
+
+   ```sh
+   ./manage.py shell -c "from apps.projects.models import Project; print(list(Project.objects.values_list('slug', 'scrub_ip_addresses')))"
+   ```
+
+   Every project must show `True`. If one shows `False`, set it and check
+   again:
+
+   ```sh
+   ./manage.py shell -c "from apps.projects.models import Project; print(Project.objects.filter(scrub_ip_addresses=False).update(scrub_ip_addresses=True))"
+   ```
+
+   GlitchTip 6.2.6 has no setting to stop it from reading an address from
+   `X-Forwarded-For`; caddy strips that header (t17), and the scrub field is
+   the second guard. After a GlitchTip update, check the field again.
 5. Copy each project's DSN (Settings → Client Keys). The DSN host must be
    `intake.ketelsen.cloud` with no path prefix, for example
    `https://<key>@intake.ketelsen.cloud/<project id>`. Brian builds the JSON
@@ -245,9 +262,26 @@ Moneo applies GlitchTip updates, Django migrations included:
 4. Update the app's YAML in TrueNAS with the merged `glitchtip/compose.yaml`.
    The diff shows only the image lines: the file holds no secret, and the env
    file does not change. `migrate` runs before `web` and `worker` start.
-5. Check: the app RUNNING, `migrate` exited 0, `/_health/` answers `ok`.
+5. Check: the app RUNNING, `migrate` exited 0, `/_health/` answers `ok`
+   ([Health check](#health-check)), and every project still has
+   `scrub_ip_addresses` `True` (step 4 of
+   [Users, organization, projects and DSNs](#users-organization-projects-and-dsns)).
 
 A Postgres major upgrade (18 to 19) is always an ask to Brian first.
+
+## Health check
+
+GlitchTip answers only the host names in `ALLOWED_HOSTS`. A request to
+`http://10.0.1.100:30053/` carries the host `10.0.1.100`, which is not in that
+list, so `/_health/` answers 400. Send 1 of the allowed names:
+
+- from the LAN, to the published port:
+  `curl -fsS -H 'Host: localhost' http://10.0.1.100:30053/_health/`
+  (`ALLOWED_HOSTS` starts with `localhost`, see `glitchtip/.env.example`);
+- or through the LAN-only UI site: `curl -fsS https://glitchtip.ketelsen.cloud/_health/`.
+
+Both answer `ok`. `test/node/runbook.test.mjs` fails on a health check to the
+published port without the `Host` header.
 
 ## Monitoring
 
