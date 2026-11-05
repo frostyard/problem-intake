@@ -1,0 +1,136 @@
+# GlitchTip for frostyard problem reports: a TrueNAS SCALE custom app
+# (docs/runbook/glitchtip.md, plan T857 section 5 "GlitchTip").
+#
+# Pinned by test/node/compose.test.mjs: 80-day event, transaction and file
+# life; sign-up and organization creation off; only web is published, on
+# 10.0.1.100; every image pinned by tag and digest; a healthcheck on web,
+# postgres and valkey; mem_limit on every service; no secret value.
+#
+# Values marked ${NAME:?} have no default and are not in Git. Brian enters
+# them in the TrueNAS UI when he installs the app (the runbook says how).
+# Images: tag plus the multi-arch index digest from Docker Hub (checked with
+# the Docker Hub API and skopeo inspect on 2026-11-05).
+
+name: glitchtip
+
+x-db-password: &db_password ${POSTGRES_PASSWORD:?set the database password in the TrueNAS UI}
+
+x-environment: &environment
+  SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in the TrueNAS UI}
+  DATABASE_HOST: postgres
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: postgres
+  DATABASE_USER: postgres
+  DATABASE_PASSWORD: *db_password
+  VALKEY_URL: redis://valkey:6379/0
+  GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN:?set the GlitchTip URL}
+  ALLOWED_HOSTS: localhost,${GLITCHTIP_ALLOWED_HOSTS:?set the GlitchTip host names}
+  DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL:?set the sender address}
+  # Retention: 80 days, plus at most 7 days in snapshots, stays under 90 days.
+  GLITCHTIP_MAX_EVENT_LIFE_DAYS: "80"
+  GLITCHTIP_MAX_TRANSACTION_EVENT_LIFE_DAYS: "80"
+  GLITCHTIP_MAX_FILE_LIFE_DAYS: "80"
+  # The same 3 limits under their GlitchTip 6 names (they win over the old ones).
+  GLITCHTIP_RETENTION_DAYS: "80"
+  GLITCHTIP_EVENT_RETENTION_DAYS: "80"
+  GLITCHTIP_TRANSACTION_RETENTION_DAYS: "80"
+  GLITCHTIP_FILE_RETENTION_DAYS: "80"
+  GLITCHTIP_LOG_RETENTION_DAYS: "80"
+  GLITCHTIP_UPTIME_RETENTION_DAYS: "80"
+  # No open sign-up: only the superuser adds users and organizations.
+  ENABLE_USER_REGISTRATION: "false"
+  ENABLE_SOCIAL_APPS_USER_REGISTRATION: "false"
+  ENABLE_OPEN_USER_REGISTRATION: "false"
+  ENABLE_ORGANIZATION_CREATION: "false"
+  # Features this store does not use.
+  GLITCHTIP_ENABLE_UPTIME: "false"
+  GLITCHTIP_ENABLE_LOGS: "false"
+  GLITCHTIP_ENABLE_MCP: "false"
+  VTASKS_CONCURRENCY: "2"
+  GRANIAN_WORKERS: "2"
+
+x-depends-on: &depends_on
+  postgres:
+    condition: service_healthy
+  valkey:
+    condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:18.6@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81
+    restart: unless-stopped
+    command: ["postgres", "-c", "max_locks_per_transaction=512"]
+    environment:
+      POSTGRES_PASSWORD: *db_password
+    volumes:
+      - /mnt/fast/glitchtip/postgres:/var/lib/postgresql
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  valkey:
+    image: valkey/valkey:9.1.3@sha256:3add1a336a920ea54770a001ab6feb3da5fceea96a40373a3a2cd469b815f0b7
+    restart: unless-stopped
+    # A cache and task queue only: no volume, no persistence.
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    image: glitchtip/glitchtip:6.2.6@sha256:a3d8eb1b36c1e1603d55ab32711ea3dd8115874742a781a57391a62a16e0dff6
+    command: ["./bin/run-migrate.sh"]
+    restart: "no"
+    environment: *environment
+    depends_on: *depends_on
+    mem_limit: 512m
+
+  web:
+    image: glitchtip/glitchtip:6.2.6@sha256:a3d8eb1b36c1e1603d55ab32711ea3dd8115874742a781a57391a62a16e0dff6
+    restart: unless-stopped
+    environment:
+      <<: *environment
+      SERVER_ROLE: web
+    depends_on:
+      <<: *depends_on
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      # The LAN address only, never all addresses. caddy (10.0.1.234) is the only client.
+      - "10.0.1.100:30053:8000"
+    volumes:
+      - /mnt/fast/glitchtip/uploads:/code/uploads
+    mem_limit: 768m
+    healthcheck:
+      # 1 shell string: some engines split the words of a CMD array item.
+      test:
+        - CMD-SHELL
+        - >-
+          python -c 'import sys, urllib.request;
+          sys.exit(0 if urllib.request.urlopen("http://localhost:8000/_health/", timeout=5).status == 200 else 1)'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  worker:
+    image: glitchtip/glitchtip:6.2.6@sha256:a3d8eb1b36c1e1603d55ab32711ea3dd8115874742a781a57391a62a16e0dff6
+    # The task worker with its scheduler (GlitchTip 6 replaced Celery and beat).
+    command: ["./bin/run-worker.sh"]
+    restart: unless-stopped
+    environment:
+      <<: *environment
+      SERVER_ROLE: worker
+    depends_on:
+      <<: *depends_on
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - /mnt/fast/glitchtip/uploads:/code/uploads
+    mem_limit: 768m

@@ -1,0 +1,15 @@
+# CI only (.github/workflows/glitchtip.yml): run the production compose.yaml
+# on a GitHub runner. The port moves to 127.0.0.1 and the volumes to temporary
+# folders (CI_DATA). Never use this file on TrueNAS.
+services:
+  postgres:
+    volumes: !override
+      - ${CI_DATA:?}/postgres:/var/lib/postgresql
+  web:
+    ports: !override
+      - "127.0.0.1:8000:8000"
+    volumes: !override
+      - ${CI_DATA:?}/uploads:/code/uploads
+  worker:
+    volumes: !override
+      - ${CI_DATA:?}/uploads:/code/uploads
