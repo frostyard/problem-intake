@@ -1,5 +1,5 @@
 /// <reference types="vite/client" />
-// The Worker never sends the report_id as a GlitchTip tag (ADR-0004): GlitchTip
+// The Worker never sends the report_id as a GlitchTip tag (ADR-0005): GlitchTip
 // keeps tag values for ever (issue_events_tagvalue has no cleanup). The
 // event_id carries the report_id, in its 32-hex form, and nothing else does.
 import { describe, expect, it } from "vitest";

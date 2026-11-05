@@ -2,7 +2,7 @@
 // (docs/design/intake.md). Built only from schema values of a validated
 // report. No request data, no client time, no IP, no server_name. The
 // report_id is only the event_id (32-hex form), never a tag: GlitchTip keeps
-// tag values for ever (ADR-0004).
+// tag values for ever (ADR-0005).
 //
 // This module uses only erasable TypeScript, so Node can import it directly
 // (scripts/glitchtip-send-event.mjs in the GlitchTip CI job).
