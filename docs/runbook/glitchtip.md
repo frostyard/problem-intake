@@ -9,34 +9,85 @@ pinned by tag and digest. No value in this runbook is a secret.
 ## Install
 
 1. **Dataset.** Brian creates the dataset `fast/glitchtip` on the NVMe mirror
-   (not under `fast/configs`), with 2 folders:
+   (not under `fast/configs`), with 3 folders:
    - `/mnt/fast/glitchtip/postgres`, owner `999:999` (the postgres user of the
      image), mode `0700`;
    - `/mnt/fast/glitchtip/uploads`, owner `5000:5000` (the GlitchTip user),
-     mode `0700`.
+     mode `0700`;
+   - `/mnt/fast/glitchtip/secrets`, owner `root:root`, mode `0700`.
    No replication task and no rsync task covers this dataset.
 2. **Snapshot task.** 1 periodic snapshot task on `fast/glitchtip`: daily,
    keep 7 days, not recursive into other datasets. Never take a manual
    snapshot of this dataset and never let an app upgrade take one
-   (`ix-app-upgrade` snapshots never expire). 80 days of live data plus at
-   most 7 days of snapshots stays under the 90 days that the privacy page
-   promises.
-3. **App.** Apps → Discover Apps → Custom App → Install via YAML, name
-   `glitchtip`. Paste `glitchtip/compose.yaml` from `main`. In the editor,
-   replace these 5 `${NAME:?...}` references with values (the values stay in
-   TrueNAS; never put them in Git, the homewiki or a report):
-   - `${SECRET_KEY:?...}`: a new random value, for example the output of
-     `openssl rand -hex 32` run on TrueNAS;
-   - `${POSTGRES_PASSWORD:?...}`: a new random value (1 place: the
-     `x-db-password` anchor feeds Postgres and GlitchTip);
-   - `${GLITCHTIP_DOMAIN:?...}`: the LAN UI URL from Teg (t17), for example
+   (`ix-app-upgrade` snapshots never expire). The [Retention](#retention)
+   section shows why 72 days of retention plus 7 days of snapshots stays under
+   the 90 days that the privacy page promises.
+3. **Env file.** The secrets and host names are in 1 file,
+   `/mnt/fast/glitchtip/secrets/glitchtip.env` (owner `root`, mode `0600`).
+   It holds these 6 names ([glitchtip/.env.example](../../glitchtip/.env.example));
+   their values never go in Git, the homewiki, the TrueNAS app YAML or a
+   report:
+   - `SECRET_KEY`: random;
+   - `POSTGRES_PASSWORD`: random;
+   - `DATABASE_PASSWORD`: the same value as `POSTGRES_PASSWORD`;
+   - `GLITCHTIP_DOMAIN`: the LAN UI URL from Teg (t17), for example
      `https://glitchtip.<LAN name>`;
-   - `${GLITCHTIP_ALLOWED_HOSTS:?...}`: `intake.ketelsen.cloud,<LAN UI host>`;
-   - `${DEFAULT_FROM_EMAIL:?...}`: a sender address.
-4. **Check.** Only `web` publishes a port: `10.0.1.100:30053`. Postgres and
-   Valkey are not published. The app shows `web`, `postgres` and `valkey`
-   healthy and `migrate` exited 0. From the LAN:
+   - `ALLOWED_HOSTS`: `localhost,intake.ketelsen.cloud,<LAN UI host>`. It must
+     start with `localhost,`: the `web` healthcheck and the scripts use
+     `localhost`. A missing `ALLOWED_HOSTS` line is a fault: GlitchTip's
+     default is `*`, every host;
+   - `DEFAULT_FROM_EMAIL`: a sender address.
+
+   Brian writes it in System → Shell after `sudo -i` (as root). The random
+   values are made by `openssl rand -hex` inside the file write, so no value
+   is shown on screen; Brian types the 3 host values at the prompts:
+
+   ```sh
+   install -d -o 0 -g 0 -m 0700 /mnt/fast/glitchtip/secrets
+   read -r -p "GLITCHTIP_DOMAIN (URL from Teg): " domain
+   read -r -p "LAN UI host name: " lan_host
+   read -r -p "DEFAULT_FROM_EMAIL: " from_email
+   (
+     umask 077
+     db_password="$(openssl rand -hex 24)"
+     {
+       echo "SECRET_KEY=$(openssl rand -hex 32)"
+       echo "POSTGRES_PASSWORD=$db_password"
+       echo "DATABASE_PASSWORD=$db_password"
+       echo "GLITCHTIP_DOMAIN=$domain"
+       echo "ALLOWED_HOSTS=localhost,intake.ketelsen.cloud,$lan_host"
+       echo "DEFAULT_FROM_EMAIL=$from_email"
+     } > /mnt/fast/glitchtip/secrets/glitchtip.env
+   )
+   chown root:root /mnt/fast/glitchtip/secrets/glitchtip.env
+   chmod 0600 /mnt/fast/glitchtip/secrets/glitchtip.env
+   ```
+
+   Check it with no value on screen:
+   `stat -c '%U %a %n' /mnt/fast/glitchtip/secrets /mnt/fast/glitchtip/secrets/glitchtip.env`
+   shows `root 700` and `root 600`;
+   `sed 's/=.*//' /mnt/fast/glitchtip/secrets/glitchtip.env` shows the 6
+   names; `grep -c '^ALLOWED_HOSTS=localhost,' /mnt/fast/glitchtip/secrets/glitchtip.env`
+   prints `1`.
+4. **App.** Apps → Discover Apps → Custom App → Install via YAML, name
+   `glitchtip`. Paste `glitchtip/compose.yaml` from `main` as it is, with no
+   edit: it has no secret and no `${...}` reference. `postgres`, `migrate`,
+   `web` and `worker` read the env file with `env_file`; `valkey` reads
+   none. A key in a service's `environment` wins over the env file, so the
+   Compose file never sets one of the 6 names (`test/node/compose.test.mjs`).
+   INFERENCE, to prove at this install: TrueNAS custom apps accept the
+   absolute `env_file` path (the app's compose runs as root). If the install
+   fails on the path, stop and tell Murbella and Moneo.
+5. **Check.** Only `web` publishes a port: `10.0.1.100:30053`. Postgres and
+   Valkey are not published. `web`, `postgres` and `valkey` are healthy.
+   `migrate` runs the migrations and exits 0 by design: the app must show
+   RUNNING, not CRASHED, with 1 container (`migrate`) exited 0. From the LAN:
    `curl -fsS http://10.0.1.100:30053/_health/` answers `ok`.
+6. **Cleanup proof.** Run the cleanup proof once before go-live
+   ([Retention](#retention)).
+
+To change a secret later, edit the env file the same way and redeploy the
+app; the Compose file does not change.
 
 ## Users, organization, projects and DSNs
 
@@ -65,15 +116,58 @@ Open sign-up and organization creation are off
 
 ## Retention
 
-- `GLITCHTIP_MAX_EVENT_LIFE_DAYS`, `GLITCHTIP_MAX_TRANSACTION_EVENT_LIFE_DAYS`
-  and `GLITCHTIP_MAX_FILE_LIFE_DAYS` are 80; the GlitchTip 6 names
-  (`GLITCHTIP_EVENT_RETENTION_DAYS`, `GLITCHTIP_TRANSACTION_RETENTION_DAYS`,
-  `GLITCHTIP_FILE_RETENTION_DAYS`, `GLITCHTIP_RETENTION_DAYS`) are 80 too.
+- Every retention value in `glitchtip/compose.yaml` is 72 days:
+  `GLITCHTIP_MAX_EVENT_LIFE_DAYS`, `GLITCHTIP_MAX_TRANSACTION_EVENT_LIFE_DAYS`,
+  `GLITCHTIP_MAX_FILE_LIFE_DAYS`, and the GlitchTip 6 names
+  `GLITCHTIP_RETENTION_DAYS`, `GLITCHTIP_EVENT_RETENTION_DAYS`,
+  `GLITCHTIP_TRANSACTION_RETENTION_DAYS`, `GLITCHTIP_FILE_RETENTION_DAYS`,
+  `GLITCHTIP_LOG_RETENTION_DAYS` and `GLITCHTIP_UPTIME_RETENTION_DAYS`.
   `test/node/compose.test.mjs` pins them.
-- Check that cleanup works (t16): in the `web` container shell,
-  `./manage.py shell -c "from django.conf import settings; print(settings.GLITCHTIP_EVENT_RETENTION_DAYS)"`
-  prints `80`. t16 then proves that the worker's scheduled cleanup removes a
-  test event older than the limit.
+- How GlitchTip 6.2.6 removes old data. Its nightly task
+  `glitchtip.tasks.perform_maintenance` runs daily at 05:00 UTC.
+  - Events are in daily partitions. `maintain_partitions` drops one when its
+    start + 1 day < today − retention, so an event lives at most retention +
+    2 days.
+  - Issue tag rows (they hold the `report_id` tag) and issue aggregates are in
+    weekly partitions, dropped when start + 7 days < today − retention.
+  - `cleanup_old_issues` deletes an issue when its `last_seen` < now −
+    (retention + 7 days).
+- The bound. With retention 72 and a daily snapshot kept 7 days, the worst
+  case is about 81 days for an event and about 88 days for a tag row or an
+  issue, under the 90 days of the privacy page. With retention 80 it was
+  about 96 days.
+- **Cleanup proof.** [scripts/glitchtip-cleanup-proof.sh](../../scripts/glitchtip-cleanup-proof.sh)
+  proves that the nightly task removes data older than the retention. Brian
+  runs it once on TrueNAS before go-live, as root (it calls `docker exec`).
+  Copy it from this repository's `main` branch first, as for the delete
+  script:
+  `curl -fsSLO https://raw.githubusercontent.com/frostyard/problem-intake/main/scripts/glitchtip-cleanup-proof.sh`,
+  then `sudo bash glitchtip-cleanup-proof.sh`. Set `GLITCHTIP_WEB_CONTAINER`
+  when the container is not `ix-glitchtip-web-1`, and `GLITCHTIP_ORG` (an
+  organization slug) for an organization other than the first one.
+  - What it does: it makes a temporary project `cleanup-proof-<random>`,
+    sends 2 test events of 2 issues to it from inside the `web` container,
+    and waits (a bounded poll) until both are stored. It moves 1 event, its
+    tag and aggregate rows and its issue back by the retention + 20 days,
+    into old partitions that it creates as GlitchTip does, and runs the real
+    nightly task. Then it deletes the temporary project with GlitchTip's
+    project deletion task and every test row left.
+  - Output: counts and PASS or FAIL only, never a DSN, key or secret. The
+    first line shows `retention_days=72`.
+  - PASS (exit 0) means: the old event, its tag and aggregate rows and its
+    issue are gone; the recent event, its tag rows and its issue stayed; and
+    no test row and no partition of the script is left (`stage=left`, all 0).
+  - Exit status: 0, PASS; 1, the proof could not run (no organization, an
+    error, or no result from GlitchTip); 2, a usage error; 3, FAIL: the
+    nightly task did not remove the old test data, or removed the recent
+    test data; 4, FAIL: test data is left after the cleanup (wins over 3 and
+    5); 5, FAIL: the 2 test events were not stored in time.
+  - Running the nightly task early also drops any real data older than the
+    retention: the same as the next night's run.
+- The CI job `glitchtip-runbook` (`.github/workflows/glitchtip.yml`) runs the
+  same script on the same image digest: it must exit 3 with
+  `--no-maintenance` (a test flag that skips the nightly task) and 0 without
+  it, with `retention_days=72`.
 
 ## Updates (plan ask T857g)
 
@@ -85,8 +179,10 @@ Moneo applies GlitchTip updates, Django migrations included:
    `curl -s https://hub.docker.com/v2/repositories/glitchtip/glitchtip/tags/<tag>`
    or `skopeo inspect`. The GlitchTip CI job must pass.
 3. Run the snapshot task by hand (Data Protection → the task → Run Now).
-4. Edit the app's YAML in TrueNAS with the new image lines; `migrate` runs
-   before `web` and `worker` start.
+4. Update the app's YAML in TrueNAS with the merged `glitchtip/compose.yaml`.
+   The diff shows only the image lines: the file holds no secret, and the env
+   file does not change. `migrate` runs before `web` and `worker` start.
+5. Check: the app RUNNING, `migrate` exited 0, `/_health/` answers `ok`.
 
 A Postgres major upgrade (18 to 19) is always an ask to Brian first.
 
