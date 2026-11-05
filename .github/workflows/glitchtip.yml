@@ -1,8 +1,9 @@
 # GlitchTip runbook proof (docs/runbook/glitchtip.md, plan T857 t15): start
 # glitchtip/compose.yaml on the runner, send 2 events of 1 issue in the
-# Worker's envelope format, find them by report_id, delete 1 with the
-# runbook's script, prove that its event and tag rows are gone, and prove
-# that the other event and the issue stay. Then prove the nightly cleanup with
+# Worker's envelope format (its own builder, src/envelope.ts), find them by
+# report_id as event id and check that no tag holds the report_id, delete 1
+# with the runbook's script, prove that no table holds its report_id
+# (pg_dump), and prove that the other event and the issue stay. Then prove the nightly cleanup with
 # scripts/glitchtip-cleanup-proof.sh: it fails with no cleanup, and passes
 # with GlitchTip's real nightly task. All secrets are throwaway values made in
 # the job, in the env file that compose.ci.yaml points to.
@@ -123,7 +124,7 @@ jobs:
           node scripts/glitchtip-send-event.mjs "$REPORT_ID"
           node scripts/glitchtip-send-event.mjs "$KEEP_ID"
 
-      - name: Find both events by report_id, in the same issue
+      - name: Find both events by report_id as event id, in the same issue, with no report_id tag
         run: |
           set -euo pipefail
           # Prints the issue id of the event with this report_id, or fails.
@@ -137,8 +138,14 @@ jobs:
                 local rc=0
                 REPORT="$1" node -e '
                   const e = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-                  const tags = Object.fromEntries((e.tags || []).map((t) => [t.key, t.value]));
-                  if (tags.report_id !== process.env.REPORT) { console.error("no report_id tag"); process.exit(1); }
+                  const forms = [process.env.REPORT, process.env.REPORT.replaceAll("-", "")];
+                  for (const t of e.tags || []) {
+                    if (forms.some((f) => String(t.key).includes(f) || String(t.value).includes(f))) {
+                      console.error(`tag ${t.key} holds the report_id`);
+                      process.exit(1);
+                    }
+                  }
+                  if (e.eventID !== forms[1]) { console.error("the event id is not the report_id"); process.exit(1); }
                   process.stdout.write(String(e.groupID));
                 ' "$body" || rc=$?
                 rm -f "$body"
@@ -175,14 +182,30 @@ jobs:
           [[ "$status" == 404 ]] || { echo "deleted event answers $status, want 404"; exit 1; }
           rc=0
           scripts/glitchtip-delete-report.sh --check "$REPORT_ID" || rc=$?
-          [[ "$rc" == 3 ]] || { echo "the check still finds the deleted report or its tag rows (exit $rc)"; exit 1; }
+          [[ "$rc" == 3 ]] || { echo "the check still finds the deleted report (exit $rc)"; exit 1; }
           status="$(status_of "$KEEP_ID")"
           [[ "$status" == 200 ]] || { echo "kept event answers $status, want 200"; exit 1; }
           scripts/glitchtip-delete-report.sh --check "$KEEP_ID"
           status="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $CI_TOKEN" \
             "http://127.0.0.1:8000/api/0/issues/$ISSUE_ID/")"
           [[ "$status" == 200 ]] || { echo "the issue answers $status, want 200"; exit 1; }
-          echo "the deleted report and its tag rows are gone; the other report and the issue stay"
+          echo "the deleted report is gone; the other report and the issue stay"
+
+      - name: Prove that no table holds the deleted report_id
+        run: |
+          set -euo pipefail
+          # The dump never reaches the log: only counts do.
+          dump="$(mktemp)"
+          $COMPOSE exec -T postgres pg_dump -U postgres --data-only postgres > "$dump"
+          count() { { grep -o -F -- "$1" "$dump" || true; } | wc -l; }
+          deleted_hyphen="$(count "$REPORT_ID")"
+          deleted_hex="$(count "${REPORT_ID//-/}")"
+          keep_hyphen="$(count "$KEEP_ID")"
+          keep_hex="$(count "${KEEP_ID//-/}")"
+          rm -f "$dump"
+          echo "pg_dump matches: deleted report_id hyphen=$deleted_hyphen hex=$deleted_hex; kept report_id hyphen=$keep_hyphen hex=$keep_hex"
+          [[ "$deleted_hyphen" == 0 && "$deleted_hex" == 0 ]] || { echo "a table still holds the deleted report_id"; exit 1; }
+          (( keep_hyphen + keep_hex >= 1 )) || { echo "the dump holds no kept report_id: the check cannot fail"; exit 1; }
 
       - name: Prove that the cleanup check fails when no cleanup runs
         run: |

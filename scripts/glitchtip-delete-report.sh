@@ -2,19 +2,21 @@
 # Delete 1 problem report from GlitchTip by its report_id
 # (docs/runbook/glitchtip.md, "Delete 1 report").
 #
-# The Worker sets the event_id to the report_id and tags the event with
-# report_id, so the report_id finds exactly 1 event. The script deletes that
-# event, the report_id tag rows of the issue aggregates, the tag value, and
-# the issue when no other event is left in it. It prints counts only.
+# The Worker sets the event_id to the report_id (ADR-0005), so the report_id
+# finds exactly 1 event by event_id. The Worker does not tag the report_id;
+# the script finds nothing by tags. It deletes that event, and the issue when
+# no other event is left in it. As a safety step for data from before
+# ADR-0005 (when the Worker still tagged report_id), it also deletes any
+# report_id tag rows and the tag value. It prints counts only.
 #
 # Usage: scripts/glitchtip-delete-report.sh [--check] <report_id>
 #   --check  count only, delete nothing
 # Exit status:
-#   0  at least 1 event with this report_id was found (and deleted)
+#   0  the event with this report_id was found (and deleted)
 #   1  no result from GlitchTip
 #   2  usage error, or the report_id is not a lowercase UUIDv4
-#   3  nothing with this report_id: no event and no tag rows
-#   4  no event, but report_id tag rows were found (and deleted)
+#   3  no event with this report_id (old report_id tag rows, if any, are
+#      deleted in delete mode; the tag_rows count shows them)
 # Environment:
 #   GLITCHTIP_WEB_CONTAINER  the GlitchTip web container (name or id);
 #                            default ix-glitchtip-web-1 (TrueNAS app "glitchtip")
@@ -82,13 +84,7 @@ if [[ -z "$result" ]]; then
 fi
 echo "${result#RESULT }"
 events="$(sed -E 's/.* events=([0-9]+) .*/\1/' <<<"$result")"
-tag_rows="$(sed -E 's/.* tag_rows=([0-9]+) .*/\1/' <<<"$result")"
-if [[ "$events" == "0" && "$tag_rows" == "0" ]]; then
-  echo "nothing with this report_id: no event and no tag rows" >&2
-  exit 3
-fi
 if [[ "$events" == "0" ]]; then
-  # Only possible after a partial deletion by hand; delete mode removed them.
-  echo "no event with this report_id, but tag rows ($mode mode)" >&2
-  exit 4
+  echo "no event with this report_id" >&2
+  exit 3
 fi
