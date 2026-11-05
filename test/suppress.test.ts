@@ -327,6 +327,16 @@ describe("the bound rule (every listed value is an integer >= 1)", () => {
     expect(published.total).toBe(42);
   });
 
+  it("runs the bound rule only at a fixed point of the linear rule, so it hides no more than it must", () => {
+    // The linear rule hides C (and then its cell) for A; the bound rule must
+    // see the slack of C's cell and leave B published.
+    const raw = { A: { x: 1, y: 1 }, B: { x: 20 }, C: { x: 9 } };
+    const published = assertSafe(raw);
+    expect(uniqueByEnumeration(raw, published)).toEqual([]);
+    expect(published.groups.B).toEqual({ total: 20, cells: { x: 20 } });
+    expect(published.total).toBe(31);
+  });
+
   it("leaves no suppressed value with only 1 possible integer value on 2000 seeded small tables", () => {
     const next = rng(0xb0d5);
     let suppressedSomething = 0;

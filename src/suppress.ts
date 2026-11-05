@@ -140,10 +140,14 @@ export function suppressTable(raw: RawTable): PublishedTable {
     ) {
       changed = true;
     }
+    // The bound rules run only at a fixed point of the linear rule: a value
+    // that the linear rule is about to suppress adds slack, and an earlier
+    // bound check would suppress more than it must.
+    if (changed) continue;
     for (const group of groups) {
       if (protectGroupBound(group.total, group.cells)) changed = true;
     }
-    if (protectGrandBound(grand, groups)) changed = true;
+    if (!changed && protectGrandBound(grand, groups)) changed = true;
   }
 
   const published: PublishedTable = { total: grand.suppressed ? null : grand.value, groups: {} };
