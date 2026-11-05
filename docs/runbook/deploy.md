@@ -17,13 +17,19 @@ caddy's env file, never into Git, the homewiki or a report.
    `problem-intake-stats`. Put its id into `wrangler.jsonc` (binding `STATS`,
    replace `REPLACE_WITH_STATS_KV_NAMESPACE_ID`) by PR. The deploy workflow
    refuses the placeholder.
-2. **Deploy token.** Create an API token for GitHub with: Workers Scripts
+2. **Analytics Engine.** Enable Workers Analytics Engine on the account
+   (Dashboard → Storage & Databases → Analytics Engine) before the first
+   deploy. The bindings `REPORTS` and `HEALTH` need it; without it the
+   deploy fails with code 10089 "You need to enable Analytics Engine".
+3. **Deploy token.** Create an API token for GitHub with: Workers Scripts
    Edit, Workers KV Storage Edit, Workers Routes Edit (or the custom domain
    permission) on the zone `frostyard.org`, Account Analytics Read, and
-   Account Settings Read. Keep its scope to the frostyard account and zone.
-3. **Analytics read token.** Create a second API token with only Account
+   Account Settings Read. Keep its scope to the frostyard account and zone:
+   its Account Resources must include the account of
+   `CLOUDFLARE_ACCOUNT_ID` (step 3).
+4. **Analytics read token.** Create a second API token with only Account
    Analytics Read. It becomes the Worker secret `AE_READ_TOKEN`.
-4. **Zone settings for `report.frostyard.org`.** No Web Analytics (RUM) on
+5. **Zone settings for `report.frostyard.org`.** No Web Analytics (RUM) on
    that host, no Logpush job for it, and no WAF or custom rule that logs
    request fields for it. Cloudflare's own security events stay, and the
    privacy page names them.
@@ -32,7 +38,7 @@ caddy's env file, never into Git, the homewiki or a report.
 
 Create the environment `production` with 2 secrets:
 
-- `CLOUDFLARE_API_TOKEN`: the deploy token of step 2.2;
+- `CLOUDFLARE_API_TOKEN`: the deploy token of step 2.3;
 - `CLOUDFLARE_ACCOUNT_ID`: the frostyard account id.
 
 Restrict the environment to the branch `main`. Until both exist, the deploy
@@ -49,7 +55,7 @@ Brian's machine, in a checkout of this repository, after `npm ci` and
 ```sh
 npx wrangler secret put INTAKE_BEARER    # the shared bearer; the same value goes to caddy (step 6)
 npx wrangler secret put GLITCHTIP_DSNS   # JSON {"system": "<dsn>", "<app id>": "<dsn>"} (runbook/glitchtip.md)
-npx wrangler secret put AE_READ_TOKEN    # the analytics read token of step 2.3
+npx wrangler secret put AE_READ_TOKEN    # the analytics read token of step 2.4
 npx wrangler secret put CF_ACCOUNT_ID    # the frostyard account id (32 hex characters)
 ```
 
@@ -78,6 +84,17 @@ Merge the KV PR (step 2.1). The push to `main` runs the deploy workflow:
   that Teg's Caddyfile reads. caddy compares it, then strips `Authorization`
   before upstream (GlitchTip reads a `Bearer` value as a DSN key), and strips
   `X-Forwarded-For`, `CF-Connecting-IP`, `True-Client-IP` and `X-Real-IP`.
+
+## Troubleshooting the deploy
+
+- **"No access to the specified service"** on
+  `/accounts/<id>/workers/services/problem-intake`: the deploy token cannot
+  reach the account. Its Account Resources must include the account of
+  `CLOUDFLARE_ACCOUNT_ID`, with Workers Scripts Edit (step 2.3). Check that
+  `CLOUDFLARE_ACCOUNT_ID` is the account that the token names.
+- **Code 10089 "You need to enable Analytics Engine"** (bindings `REPORTS`
+  and `HEALTH`): enable Workers Analytics Engine on the account (step 2.2),
+  then run the deploy again.
 
 ## Kill switch
 
