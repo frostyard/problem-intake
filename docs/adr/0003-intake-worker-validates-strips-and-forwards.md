@@ -1,6 +1,6 @@
 # 0003 — The intake Worker validates, strips and forwards problem reports
 
-- **Status:** Accepted; GlitchTip retention superseded by [0004](0004-glitchtip-env-file-and-72-day-retention.md)
+- **Status:** Accepted; GlitchTip retention superseded by [0004](0004-glitchtip-env-file-and-72-day-retention.md); the `report_id` tag superseded by [0005](0005-the-worker-sends-no-report-id-tag.md)
 - **Date:** 2026-11-05
 
 ## Context

@@ -191,7 +191,7 @@ Open sign-up and organization creation are off
   - Events are in daily partitions. `maintain_partitions` drops one when its
     start + 1 day < today − retention, so an event lives at most retention +
     2 days.
-  - Issue tag rows (they hold the `report_id` tag) and issue aggregates are in
+  - Issue tag rows and issue aggregates are in
     weekly partitions, dropped when start + 7 days < today − retention.
   - `cleanup_old_issues` deletes an issue when its `last_seen` < now −
     (retention + 7 days).
@@ -262,35 +262,39 @@ A Postgres major upgrade (18 to 19) is always an ask to Brian first.
 
 A user gives a `report_id` (chairlift "Sent reports", or
 `/var/lib/snosi-health/sent.jsonl` on Floe). The Worker sets the event ID to
-the `report_id` and tags the event `report_id`.
+the `report_id` without dashes, and no tag holds the `report_id`
+([ADR-0005](../adr/0005-the-worker-sends-no-report-id-tag.md)): GlitchTip
+keeps tag values for ever.
 
 The script runs on TrueNAS as root (it calls `docker exec`). Copy it from
 this repository's `main` branch first, for example with
 `curl -fsSLO https://raw.githubusercontent.com/frostyard/problem-intake/main/scripts/glitchtip-delete-report.sh`.
 
-1. Find it: in the LAN UI search the organization's issues for
-   `report_id:<report_id>`, or run on TrueNAS
+1. Find it: run on TrueNAS
    `sudo bash glitchtip-delete-report.sh --check <report_id>`, which prints
-   counts only.
+   counts only, or open the event in the LAN UI by its event ID (the
+   `report_id` without dashes). There is no `report_id` tag to search.
 2. Delete it: `sudo bash glitchtip-delete-report.sh <report_id>`. The
-   script deletes the event, the `report_id` rows of the issue tag
-   aggregates and the tag value, and the issue when no other event is left in
-   it. Set `GLITCHTIP_WEB_CONTAINER` when the container is not
-   `ix-glitchtip-web-1` (`sudo docker ps --format '{{.Names}}' | grep web`).
-3. Check: `--check` exits 3 ("nothing with this report_id: no event and no
-   tag rows"), and the UI search finds nothing.
+   script deletes the event, and the issue when no other event is left in
+   it. As a safety step it also deletes `report_id` tag rows and the tag
+   value if any exist (none since ADR-0005). Set `GLITCHTIP_WEB_CONTAINER`
+   when the container is not `ix-glitchtip-web-1`
+   (`sudo docker ps --format '{{.Names}}' | grep web`).
+3. Check: `--check` exits 3 ("no event with this report_id").
 4. Snapshots keep the deleted event up to 7 more days; that is in the
    retention that the privacy page states.
 
-Exit status of the script: 0, at least 1 event found (and deleted); 1, no
-result from GlitchTip; 2, a usage error or a report_id that is not a
-lowercase UUIDv4; 3, no event and no tag rows; 4, no event but `report_id`
-tag rows found (they are deleted in delete mode; run `--check` again, which
-then exits 3).
+Exit status of the script: 0, the event found (and deleted); 1, no result
+from GlitchTip; 2, a usage error or a report_id that is not a lowercase
+UUIDv4; 3, no event with this report_id (old `report_id` tag rows, if any,
+are deleted in delete mode; the `tag_rows` count shows them).
 
 The CI job `glitchtip-runbook` (`.github/workflows/glitchtip.yml`) proves
-these steps: it deletes 1 of 2 reports of 1 issue and checks that the other
-report and the issue stay. It runs on every change to `glitchtip/**` and
+these steps: it sends 2 reports of 1 issue with the Worker's envelope
+builder, finds each by its event ID and checks that no tag holds the
+`report_id`, deletes 1, checks that the other report and the issue stay, and
+checks in a `pg_dump` of the database that no table holds the deleted
+`report_id` (hyphen or 32-hex form). It runs on every change to `glitchtip/**` and
 `scripts/glitchtip-*`.
 
 ## Kill switch
@@ -303,6 +307,7 @@ needed: the Worker answers 502 and senders retry the next day.
 ## References
 
 - Rationale: [ADR-0003](../adr/0003-intake-worker-validates-strips-and-forwards.md),
-  [ADR-0004](../adr/0004-glitchtip-env-file-and-72-day-retention.md) (env file, 72-day retention)
+  [ADR-0004](../adr/0004-glitchtip-env-file-and-72-day-retention.md) (env file, 72-day retention),
+  [ADR-0005](../adr/0005-the-worker-sends-no-report-id-tag.md) (no `report_id` tag)
 - Context: [design/intake.md](../design/intake.md)
 - Deploy: [deploy.md](deploy.md)

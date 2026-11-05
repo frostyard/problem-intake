@@ -19,7 +19,7 @@ at most 90 days. GlitchTip 6.2.6 removes old data in its nightly task
 
 - events are in daily partitions; `maintain_partitions` drops one when its
   start + 1 day < today − retention;
-- issue tag rows (they hold the `report_id` tag) and issue aggregates are in
+- issue tag rows and issue aggregates are in
   weekly partitions, dropped when start + 7 days < today − retention;
 - `cleanup_old_issues` deletes an issue when its `last_seen` < now −
   (retention + 7 days).

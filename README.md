@@ -40,8 +40,8 @@ Contracts: [intake API](docs/specs/intake-api.md),
   `console` call.
 - Every document must pass the schema: closed shape, enums, patterns and the
   app ID allowlist; no free text.
-- GlitchTip gets each problem with a `report_id` tag, `user.ip_address` null
-  and no `server_name`. `count` reports never go to GlitchTip. GlitchTip's
+- GlitchTip gets each problem with the `report_id` as its event ID and in no
+  tag, `user.ip_address` null and no `server_name`. `count` reports never go to GlitchTip. GlitchTip's
   retention is 72 days: with its partition cleanup and 7 days of snapshots,
   data lives at most about 88 days, under 90 days
   ([runbook](docs/runbook/glitchtip.md#retention)).

@@ -46,8 +46,9 @@ cron Monday ──► SQL API ──► KV aggregates/<week>.json, aggregates/in
   envelope with 1 event. `GLITCHTIP_DSNS` maps `system` and app IDs to DSNs;
   an app without its own project goes to `system`. Only `https` DSNs with no
   path prefix, query or secret part are accepted.
-- **Event.** `event_id` is the `report_id` without dashes; tags hold the
-  envelope values and each scalar `detail` field; `extra.detail` holds the
+- **Event.** `event_id` is the `report_id` without dashes, and no tag holds
+  the `report_id` ([ADR-0005](../adr/0005-the-worker-sends-no-report-id-tag.md));
+  tags hold the other envelope values and each scalar `detail` field; `extra.detail` holds the
   detail object; `fingerprint` is kind and class plus the unit, feature,
   TPM code, executable, or app with its code, first 3 frames or location;
   `user.ip_address` is null. No `server_name`, `request`, `contexts` or
@@ -99,6 +100,7 @@ cron Monday ──► SQL API ──► KV aggregates/<week>.json, aggregates/in
 
 - Rationale: [ADR-0003](../adr/0003-intake-worker-validates-strips-and-forwards.md),
   [ADR-0004](../adr/0004-glitchtip-env-file-and-72-day-retention.md) (GlitchTip env file, 72-day retention),
+  [ADR-0005](../adr/0005-the-worker-sends-no-report-id-tag.md) (no `report_id` tag),
   core [ADR-0069](https://github.com/frostyard/core/blob/main/docs/adr/0069-report-problems-local-first-opt-in-with-one-sender-per-host.md)
 - Contracts: [specs/intake-api.md](../specs/intake-api.md),
   [specs/analytics-points.md](../specs/analytics-points.md),
