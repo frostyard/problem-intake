@@ -1,0 +1,181 @@
+# GlitchTip runbook proof (docs/runbook/glitchtip.md, plan T857 t15): start
+# glitchtip/compose.yaml on the runner, send 2 events of 1 issue in the
+# Worker's envelope format, find them by report_id, delete 1 with the
+# runbook's script, prove that its event and tag rows are gone, and prove
+# that the other event and the issue stay. All secrets are throwaway values
+# made in the job.
+name: GlitchTip runbook
+
+on:
+  pull_request:
+    paths:
+      - "glitchtip/**"
+      - "scripts/glitchtip-*"
+      - "src/envelope.ts"
+      - ".github/workflows/glitchtip.yml"
+  merge_group: {}
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: glitchtip-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  glitchtip-runbook:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      COMPOSE: docker compose -p glitchtip-ci -f glitchtip/compose.yaml -f glitchtip/compose.ci.yaml
+      GLITCHTIP_DOMAIN: http://localhost:8000
+      GLITCHTIP_ALLOWED_HOSTS: 127.0.0.1
+      DEFAULT_FROM_EMAIL: glitchtip-ci@example.invalid
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4.2.5
+
+      - name: Make throwaway secrets and data folders
+        run: |
+          set -euo pipefail
+          secret_key="$(openssl rand -hex 32)"
+          db_password="$(openssl rand -hex 24)"
+          echo "::add-mask::$secret_key"
+          echo "::add-mask::$db_password"
+          data="$(mktemp -d)"
+          mkdir -p "$data/postgres" "$data/uploads"
+          # The postgres entrypoint, as uid 999, must pass the mount point;
+          # GlitchTip runs as uid 5000 and writes uploads.
+          chmod 755 "$data/postgres"
+          sudo chown 5000:5000 "$data/uploads"
+          {
+            echo "SECRET_KEY=$secret_key"
+            echo "POSTGRES_PASSWORD=$db_password"
+            echo "CI_DATA=$data"
+          } >> "$GITHUB_ENV"
+
+      - name: Start the stack
+        run: |
+          set -euo pipefail
+          $COMPOSE config --quiet
+          $COMPOSE up -d
+          for _ in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8000/_health/ >/dev/null 2>&1; then
+              echo "web is healthy"
+              exit 0
+            fi
+            sleep 5
+          done
+          $COMPOSE ps
+          $COMPOSE logs --tail 100 migrate web
+          exit 1
+
+      - name: Check the published port and the healthcheck
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 30); do
+            status="$(docker inspect --format '{{.State.Health.Status}}' "$($COMPOSE ps -q web)")"
+            [[ "$status" == healthy ]] && break
+            sleep 5
+          done
+          [[ "$status" == healthy ]] || { echo "web healthcheck: $status"; exit 1; }
+          # Only web publishes a port.
+          for service in postgres valkey worker; do
+            ports="$(docker port "$($COMPOSE ps -q "$service")" || true)"
+            [[ -z "$ports" ]] || { echo "$service publishes $ports"; exit 1; }
+          done
+
+      - name: Create a user, an organization, a project and a token
+        run: |
+          set -euo pipefail
+          out="$($COMPOSE exec -T -e GLITCHTIP_CI=true web ./manage.py shell < scripts/glitchtip-ci-setup.py)"
+          dsn="$(sed -n 's/^CI_DSN=//p' <<<"$out")"
+          token="$(sed -n 's/^CI_TOKEN=//p' <<<"$out")"
+          [[ -n "$dsn" && -n "$token" ]] || { echo "setup gave no DSN or token"; exit 1; }
+          echo "::add-mask::$token"
+          {
+            echo "CI_DSN=$dsn"
+            echo "CI_TOKEN=$token"
+            # 2 reports with the same fingerprint, so 1 issue: delete the
+            # first, and keep the second.
+            echo "REPORT_ID=$(node -e 'process.stdout.write(crypto.randomUUID())')"
+            echo "KEEP_ID=$(node -e 'process.stdout.write(crypto.randomUUID())')"
+          } >> "$GITHUB_ENV"
+
+      - name: Send 2 events of 1 issue in the Worker's envelope format
+        run: |
+          set -euo pipefail
+          node scripts/glitchtip-send-event.mjs "$REPORT_ID"
+          node scripts/glitchtip-send-event.mjs "$KEEP_ID"
+
+      - name: Find both events by report_id, in the same issue
+        run: |
+          set -euo pipefail
+          # Prints the issue id of the event with this report_id, or fails.
+          find_event() {
+            local url="http://127.0.0.1:8000/api/0/projects/frostyard/system/events/${1//-/}/"
+            local body
+            body="$(mktemp)"
+            for _ in $(seq 1 60); do
+              if curl -fsS -H "Authorization: Bearer $CI_TOKEN" "$url" -o "$body"; then
+                # The caller's || turns off set -e here: check the status by hand.
+                local rc=0
+                REPORT="$1" node -e '
+                  const e = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+                  const tags = Object.fromEntries((e.tags || []).map((t) => [t.key, t.value]));
+                  if (tags.report_id !== process.env.REPORT) { console.error("no report_id tag"); process.exit(1); }
+                  process.stdout.write(String(e.groupID));
+                ' "$body" || rc=$?
+                rm -f "$body"
+                return "$rc"
+              fi
+              sleep 5
+            done
+            rm -f "$body"
+            echo "the event did not arrive" >&2
+            return 1
+          }
+          issue_a="$(find_event "$REPORT_ID")" || { $COMPOSE logs --tail 100 web worker; exit 1; }
+          issue_b="$(find_event "$KEEP_ID")" || { $COMPOSE logs --tail 100 web worker; exit 1; }
+          [[ "$issue_a" == "$issue_b" ]] || { echo "the 2 events are in 2 issues ($issue_a, $issue_b)"; exit 1; }
+          echo "ISSUE_ID=$issue_a" >> "$GITHUB_ENV"
+          export GLITCHTIP_WEB_CONTAINER
+          GLITCHTIP_WEB_CONTAINER="$($COMPOSE ps -q web)"
+          scripts/glitchtip-delete-report.sh --check "$REPORT_ID"
+          scripts/glitchtip-delete-report.sh --check "$KEEP_ID"
+
+      - name: Delete 1 report with the runbook script
+        run: GLITCHTIP_WEB_CONTAINER="$($COMPOSE ps -q web)" scripts/glitchtip-delete-report.sh "$REPORT_ID"
+
+      - name: Prove that it is gone and that the other report stays
+        run: |
+          set -euo pipefail
+          export GLITCHTIP_WEB_CONTAINER
+          GLITCHTIP_WEB_CONTAINER="$($COMPOSE ps -q web)"
+          status_of() {
+            curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $CI_TOKEN" \
+              "http://127.0.0.1:8000/api/0/projects/frostyard/system/events/${1//-/}/"
+          }
+          status="$(status_of "$REPORT_ID")"
+          [[ "$status" == 404 ]] || { echo "deleted event answers $status, want 404"; exit 1; }
+          rc=0
+          scripts/glitchtip-delete-report.sh --check "$REPORT_ID" || rc=$?
+          [[ "$rc" == 3 ]] || { echo "the check still finds the deleted report or its tag rows (exit $rc)"; exit 1; }
+          status="$(status_of "$KEEP_ID")"
+          [[ "$status" == 200 ]] || { echo "kept event answers $status, want 200"; exit 1; }
+          scripts/glitchtip-delete-report.sh --check "$KEEP_ID"
+          status="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $CI_TOKEN" \
+            "http://127.0.0.1:8000/api/0/issues/$ISSUE_ID/")"
+          [[ "$status" == 200 ]] || { echo "the issue answers $status, want 200"; exit 1; }
+          echo "the deleted report and its tag rows are gone; the other report and the issue stay"
+
+      - name: Stop the stack
+        if: always()
+        run: |
+          $COMPOSE down -v --remove-orphans || true
+          if [[ -n "${CI_DATA:-}" ]]; then sudo rm -rf "$CI_DATA"; fi

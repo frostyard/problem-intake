@@ -1,0 +1,76 @@
+# Deploy the problem-intake Worker (docs/runbook/deploy.md). A risk path:
+# publication. Runs on a push to main that changes the Worker, or by hand.
+#
+# Before Brian's setup (docs/runbook/deploy.md), the environment has no
+# Cloudflare secrets: the job writes a notice and skips the deploy with
+# success, so main stays green. With the secrets set, the job refuses the KV
+# placeholder id in wrangler.jsonc. The Worker secrets themselves are set with
+# `wrangler secret put` by Brian, never here.
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "schema/**"
+      - "wrangler.jsonc"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4.2.5
+
+      - name: Check the deploy setup
+        id: setup
+        env:
+          HAS_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          HAS_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+        run: |
+          set -euo pipefail
+          if [[ "$HAS_TOKEN" != true || "$HAS_ACCOUNT" != true ]]; then
+            echo "::notice::The production environment has no CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID; the deploy is skipped (docs/runbook/deploy.md)."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if grep -q 'REPLACE_WITH_STATS_KV_NAMESPACE_ID' wrangler.jsonc; then
+            echo "::error::wrangler.jsonc still holds the KV placeholder id; put the STATS namespace id in by PR first (docs/runbook/deploy.md)."
+            exit 1
+          fi
+          echo "deploy=true" >> "$GITHUB_OUTPUT"
+
+      - name: Install
+        run: npm ci
+
+      - name: Test and build
+        run: make check
+        env:
+          WRANGLER_SEND_METRICS: "false"
+
+      - name: Deploy the Worker
+        if: steps.setup.outputs.deploy == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WRANGLER_SEND_METRICS: "false"
+        run: npx wrangler deploy

@@ -1,0 +1,70 @@
+// The problem-intake Worker (docs/design/intake.md, ADR-0003).
+// Privacy settings in this file are pinned by test/node/wrangler-config.test.mjs:
+// observability, logs, traces and Logpush stay off, no tail consumer, no
+// workers.dev or preview URL. Secrets are names only (secrets.required); their
+// values live in Cloudflare, never in Git (docs/runbook/deploy.md).
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "problem-intake",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "report.frostyard.org",
+      "custom_domain": true
+    }
+  ],
+  "observability": {
+    "enabled": false,
+    "logs": {
+      "enabled": false,
+      "invocation_logs": false
+    },
+    "traces": {
+      "enabled": false
+    }
+  },
+  "logpush": false,
+  // Wrangler sends no usage telemetry from this project.
+  "send_metrics": false,
+  "ratelimits": [
+    {
+      "name": "REPORT_LIMIT",
+      "namespace_id": "8571",
+      "simple": {
+        "limit": 10,
+        "period": 60
+      }
+    }
+  ],
+  "analytics_engine_datasets": [
+    {
+      "binding": "REPORTS",
+      "dataset": "problem_reports"
+    },
+    {
+      "binding": "HEALTH",
+      "dataset": "problem_intake_health"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "STATS",
+      // Placeholder: Brian creates the namespace and replaces this id by PR.
+      // The deploy workflow refuses to deploy while the placeholder is here.
+      "id": "REPLACE_WITH_STATS_KV_NAMESPACE_ID"
+    }
+  ],
+  "triggers": {
+    // Hourly health job, and the weekly aggregation on Monday (UTC).
+    "crons": ["17 * * * *", "23 3 * * 1"]
+  },
+  "vars": {
+    "KILL_SWITCH": "off"
+  },
+  "secrets": {
+    "required": ["INTAKE_BEARER", "GLITCHTIP_DSNS", "AE_READ_TOKEN", "CF_ACCOUNT_ID"]
+  }
+}
