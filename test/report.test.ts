@@ -378,6 +378,36 @@ describe("POST /v1/report: forward failures", () => {
     expect((await failWith()).blobs).toEqual(["forward_failed", "5xx"]);
   });
 
+  it("aborts a pending forward with AbortSignal.timeout(10000) and counts a timeout", async () => {
+    // No real wait: the spy hands out a signal that the test aborts, and the
+    // mock fetch stays pending until the signal that it gets aborts.
+    const timer = new AbortController();
+    const asked: number[] = [];
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      asked.push(ms);
+      return timer.signal;
+    });
+    let started: () => void = () => undefined;
+    const fetchStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+      started();
+      const signal = (init as RequestInit | undefined)?.signal;
+      if (!signal) return Promise.reject(new TypeError("the forward has no signal"));
+      return new Promise<Response>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    });
+    const testEnv = makeEnv();
+    const pending = call(reportRequest(JSON.stringify(example("crash"))), testEnv);
+    await fetchStarted;
+    expect(asked).toEqual([10_000]);
+    timer.abort(new DOMException("The operation timed out.", "TimeoutError"));
+    await expectError(await pending, 502, "upstream");
+    expect(testEnv.HEALTH.points).toEqual([{ indexes: ["forward_failed"], blobs: ["forward_failed", "timeout"], doubles: [1] }]);
+  });
+
   it("counts a network error", async () => {
     mockFetch(() => {
       throw new TypeError("network down");
