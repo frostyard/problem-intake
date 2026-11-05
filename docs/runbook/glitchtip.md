@@ -118,13 +118,21 @@ this repository's `main` branch first, for example with
    aggregates and the tag value, and the issue when no other event is left in
    it. Set `GLITCHTIP_WEB_CONTAINER` when the container is not
    `ix-glitchtip-web-1` (`sudo docker ps --format '{{.Names}}' | grep web`).
-3. Check: `--check` exits 3 ("no event with this report_id"), and the UI
-   search finds nothing.
+3. Check: `--check` exits 3 ("nothing with this report_id: no event and no
+   tag rows"), and the UI search finds nothing.
 4. Snapshots keep the deleted event up to 7 more days; that is in the
    retention that the privacy page states.
 
+Exit status of the script: 0, at least 1 event found (and deleted); 1, no
+result from GlitchTip; 2, a usage error or a report_id that is not a
+lowercase UUIDv4; 3, no event and no tag rows; 4, no event but `report_id`
+tag rows found (they are deleted in delete mode; run `--check` again, which
+then exits 3).
+
 The CI job `glitchtip-runbook` (`.github/workflows/glitchtip.yml`) proves
-these steps on every change to `glitchtip/**` or `scripts/glitchtip-*`.
+these steps: it deletes 1 of 2 reports of 1 issue and checks that the other
+report and the issue stay. It runs on every change to `glitchtip/**` and
+`scripts/glitchtip-*`.
 
 ## Kill switch
 

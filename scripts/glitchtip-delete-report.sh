@@ -9,6 +9,12 @@
 #
 # Usage: scripts/glitchtip-delete-report.sh [--check] <report_id>
 #   --check  count only, delete nothing
+# Exit status:
+#   0  at least 1 event with this report_id was found (and deleted)
+#   1  no result from GlitchTip
+#   2  usage error, or the report_id is not a lowercase UUIDv4
+#   3  nothing with this report_id: no event and no tag rows
+#   4  no event, but report_id tag rows were found (and deleted)
 # Environment:
 #   GLITCHTIP_WEB_CONTAINER  the GlitchTip web container (name or id);
 #                            default ix-glitchtip-web-1 (TrueNAS app "glitchtip")
@@ -76,7 +82,13 @@ if [[ -z "$result" ]]; then
 fi
 echo "${result#RESULT }"
 events="$(sed -E 's/.* events=([0-9]+) .*/\1/' <<<"$result")"
-if [[ "$events" == "0" ]]; then
-  echo "no event with this report_id" >&2
+tag_rows="$(sed -E 's/.* tag_rows=([0-9]+) .*/\1/' <<<"$result")"
+if [[ "$events" == "0" && "$tag_rows" == "0" ]]; then
+  echo "nothing with this report_id: no event and no tag rows" >&2
   exit 3
+fi
+if [[ "$events" == "0" ]]; then
+  # Only possible after a partial deletion by hand; delete mode removed them.
+  echo "no event with this report_id, but tag rows ($mode mode)" >&2
+  exit 4
 fi

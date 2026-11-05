@@ -1,7 +1,9 @@
 # GlitchTip runbook proof (docs/runbook/glitchtip.md, plan T857 t15): start
-# glitchtip/compose.yaml on the runner, send 1 event in the Worker's envelope
-# format, find it by report_id, delete it with the runbook's script, and
-# prove that it is gone. All secrets are throwaway values made in the job.
+# glitchtip/compose.yaml on the runner, send 2 events of 1 issue in the
+# Worker's envelope format, find them by report_id, delete 1 with the
+# runbook's script, prove that its event and tag rows are gone, and prove
+# that the other event and the issue stay. All secrets are throwaway values
+# made in the job.
 name: GlitchTip runbook
 
 on:
@@ -99,49 +101,76 @@ jobs:
           {
             echo "CI_DSN=$dsn"
             echo "CI_TOKEN=$token"
+            # 2 reports with the same fingerprint, so 1 issue: delete the
+            # first, and keep the second.
             echo "REPORT_ID=$(node -e 'process.stdout.write(crypto.randomUUID())')"
+            echo "KEEP_ID=$(node -e 'process.stdout.write(crypto.randomUUID())')"
           } >> "$GITHUB_ENV"
 
-      - name: Send 1 event in the Worker's envelope format
-        run: node scripts/glitchtip-send-event.mjs "$REPORT_ID"
-
-      - name: Find the event by report_id
+      - name: Send 2 events of 1 issue in the Worker's envelope format
         run: |
           set -euo pipefail
-          event_id="${REPORT_ID//-/}"
-          url="http://127.0.0.1:8000/api/0/projects/frostyard/system/events/$event_id/"
-          for _ in $(seq 1 60); do
-            if curl -fsS -H "Authorization: Bearer $CI_TOKEN" "$url" -o event.json; then
-              node -e '
-                const e = JSON.parse(require("fs").readFileSync("event.json", "utf8"));
-                const tags = Object.fromEntries((e.tags || []).map((t) => [t.key, t.value]));
-                if (tags.report_id !== process.env.REPORT_ID) { console.error("no report_id tag"); process.exit(1); }
-                console.log("found the event; report_id tag matches");
-              '
-              rm -f event.json
-              GLITCHTIP_WEB_CONTAINER="$($COMPOSE ps -q web)" scripts/glitchtip-delete-report.sh --check "$REPORT_ID"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "the event did not arrive"
-          $COMPOSE logs --tail 100 web worker
-          exit 1
+          node scripts/glitchtip-send-event.mjs "$REPORT_ID"
+          node scripts/glitchtip-send-event.mjs "$KEEP_ID"
 
-      - name: Delete it with the runbook script
+      - name: Find both events by report_id, in the same issue
+        run: |
+          set -euo pipefail
+          # Prints the issue id of the event with this report_id, or fails.
+          find_event() {
+            local url="http://127.0.0.1:8000/api/0/projects/frostyard/system/events/${1//-/}/"
+            local body
+            body="$(mktemp)"
+            for _ in $(seq 1 60); do
+              if curl -fsS -H "Authorization: Bearer $CI_TOKEN" "$url" -o "$body"; then
+                REPORT="$1" node -e '
+                  const e = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+                  const tags = Object.fromEntries((e.tags || []).map((t) => [t.key, t.value]));
+                  if (tags.report_id !== process.env.REPORT) { console.error("no report_id tag"); process.exit(1); }
+                  process.stdout.write(String(e.groupID));
+                ' "$body"
+                rm -f "$body"
+                return 0
+              fi
+              sleep 5
+            done
+            rm -f "$body"
+            echo "the event did not arrive" >&2
+            return 1
+          }
+          issue_a="$(find_event "$REPORT_ID")" || { $COMPOSE logs --tail 100 web worker; exit 1; }
+          issue_b="$(find_event "$KEEP_ID")" || { $COMPOSE logs --tail 100 web worker; exit 1; }
+          [[ "$issue_a" == "$issue_b" ]] || { echo "the 2 events are in 2 issues ($issue_a, $issue_b)"; exit 1; }
+          echo "ISSUE_ID=$issue_a" >> "$GITHUB_ENV"
+          export GLITCHTIP_WEB_CONTAINER
+          GLITCHTIP_WEB_CONTAINER="$($COMPOSE ps -q web)"
+          scripts/glitchtip-delete-report.sh --check "$REPORT_ID"
+          scripts/glitchtip-delete-report.sh --check "$KEEP_ID"
+
+      - name: Delete 1 report with the runbook script
         run: GLITCHTIP_WEB_CONTAINER="$($COMPOSE ps -q web)" scripts/glitchtip-delete-report.sh "$REPORT_ID"
 
-      - name: Prove that it is gone
+      - name: Prove that it is gone and that the other report stays
         run: |
           set -euo pipefail
-          event_id="${REPORT_ID//-/}"
-          status="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $CI_TOKEN" \
-            "http://127.0.0.1:8000/api/0/projects/frostyard/system/events/$event_id/")"
-          [[ "$status" == 404 ]] || { echo "event answer $status, want 404"; exit 1; }
+          export GLITCHTIP_WEB_CONTAINER
+          GLITCHTIP_WEB_CONTAINER="$($COMPOSE ps -q web)"
+          status_of() {
+            curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $CI_TOKEN" \
+              "http://127.0.0.1:8000/api/0/projects/frostyard/system/events/${1//-/}/"
+          }
+          status="$(status_of "$REPORT_ID")"
+          [[ "$status" == 404 ]] || { echo "deleted event answers $status, want 404"; exit 1; }
           rc=0
-          GLITCHTIP_WEB_CONTAINER="$($COMPOSE ps -q web)" scripts/glitchtip-delete-report.sh --check "$REPORT_ID" || rc=$?
-          [[ "$rc" == 3 ]] || { echo "the check found the report again (exit $rc)"; exit 1; }
-          echo "the event and its report_id tag are gone"
+          scripts/glitchtip-delete-report.sh --check "$REPORT_ID" || rc=$?
+          [[ "$rc" == 3 ]] || { echo "the check still finds the deleted report or its tag rows (exit $rc)"; exit 1; }
+          status="$(status_of "$KEEP_ID")"
+          [[ "$status" == 200 ]] || { echo "kept event answers $status, want 200"; exit 1; }
+          scripts/glitchtip-delete-report.sh --check "$KEEP_ID"
+          status="$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $CI_TOKEN" \
+            "http://127.0.0.1:8000/api/0/issues/$ISSUE_ID/")"
+          [[ "$status" == 200 ]] || { echo "the issue answers $status, want 200"; exit 1; }
+          echo "the deleted report and its tag rows are gone; the other report and the issue stay"
 
       - name: Stop the stack
         if: always()
