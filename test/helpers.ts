@@ -133,3 +133,36 @@ export function parseEnvelope(body: string): { header: unknown; item: { type: st
     event: JSON.parse(lines[2]),
   };
 }
+
+// A byte stream that counts the bytes that its reader takes. A BYOB read
+// gets at most the size it asks for; a default read gets a whole chunk.
+export function countingStream(chunks: number[]): { stream: ReadableStream<Uint8Array>; taken: () => number } {
+  const queue = chunks.map((size) => new Uint8Array(size).fill(0x20));
+  let taken = 0;
+  const stream = new ReadableStream({
+    type: "bytes",
+    pull(controller) {
+      const request = controller.byobRequest;
+      const chunk = queue[0];
+      if (chunk === undefined) {
+        controller.close();
+        request?.respond(0);
+        return;
+      }
+      if (request?.view) {
+        const view = new Uint8Array(request.view.buffer, request.view.byteOffset, request.view.byteLength);
+        const n = Math.min(view.byteLength, chunk.byteLength);
+        view.set(chunk.subarray(0, n));
+        queue[0] = chunk.subarray(n);
+        if (queue[0].byteLength === 0) queue.shift();
+        taken += n;
+        request.respond(n);
+      } else {
+        queue.shift();
+        taken += chunk.byteLength;
+        controller.enqueue(chunk);
+      }
+    },
+  }) as ReadableStream<Uint8Array>;
+  return { stream, taken: () => taken };
+}

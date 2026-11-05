@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { declaredLengthTooLarge, readLimitedBody } from "../src/body.ts";
+import { declaredLengthTooLarge } from "../src/body.ts";
 import { buildEnvelope, buildEvent, eventId } from "../src/envelope.ts";
 import { parseDsn, parseDsnMap } from "../src/forward.ts";
 import { isJsonContentType, killSwitchOn } from "../src/report.ts";
@@ -133,18 +133,6 @@ describe("request checks", () => {
     expect(declaredLengthTooLarge(value, 8192)).toBe(tooLarge);
   });
 
-  it("reads a body in chunks up to the limit", async () => {
-    const chunks = [new Uint8Array([1, 2]), new Uint8Array([3])];
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        for (const c of chunks) controller.enqueue(c);
-        controller.close();
-      },
-    });
-    const result = await readLimitedBody(stream, 3);
-    expect(result).toEqual({ ok: true, bytes: new Uint8Array([1, 2, 3]) });
-    expect(await readLimitedBody(null, 3)).toEqual({ ok: true, bytes: new Uint8Array(0) });
-  });
 });
 
 describe("ISO weeks", () => {

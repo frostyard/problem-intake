@@ -7,6 +7,7 @@ import {
   APP_ENVELOPE_URL,
   APP_KEY,
   call,
+  countingStream,
   EXAMPLES,
   example,
   makeEnv,
@@ -240,14 +241,7 @@ describe("POST /v1/report: size limit", () => {
   });
 
   it("refuses a streamed body over the limit that declares no length", async () => {
-    let pulled = 0;
-    const stream = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        pulled += 1;
-        if (pulled > 100) controller.close();
-        else controller.enqueue(new Uint8Array(1024).fill(0x20));
-      },
-    });
+    const { stream, taken } = countingStream(Array(100).fill(1024));
     const request = new Request(REPORT_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -255,8 +249,8 @@ describe("POST /v1/report: size limit", () => {
       duplex: "half",
     } as RequestInit);
     await expectError(await call(request, makeEnv()), 413, "too_large");
-    // The reader stops right after the limit: 9 chunks of 1 KiB, not 100.
-    expect(pulled).toBeLessThan(12);
+    // The reader stops right after the limit: 8193 bytes, not 100 KiB.
+    expect(taken()).toBeLessThanOrEqual(MAX_BODY_BYTES + 1);
   });
 
   it("does not trust a small declared length", async () => {

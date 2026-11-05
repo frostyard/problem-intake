@@ -1,5 +1,7 @@
-// Read a request body with a hard byte limit. The stream is read at most to
-// limit + 1 bytes and then cancelled, so a large body is never buffered.
+// Read a request body with a hard byte limit. A BYOB reader asks the stream
+// for at most the remaining allowance + 1 byte at each read, so the Worker
+// takes at most limit + 1 bytes from the stream, even when the sender writes
+// larger chunks, and then cancels it. A large body is never buffered.
 
 export const MAX_BODY_BYTES = 8192;
 
@@ -7,26 +9,26 @@ export type BodyResult = { ok: true; bytes: Uint8Array } | { ok: false };
 
 export async function readLimitedBody(body: ReadableStream<Uint8Array> | null, limit: number): Promise<BodyResult> {
   if (body === null) return { ok: true, bytes: new Uint8Array(0) };
-  const reader = body.getReader();
-  const chunks: Uint8Array[] = [];
+  const reader = body.getReader({ mode: "byob" });
+  // Each read transfers the buffer; the next read continues in the buffer
+  // that the last read gave back.
+  let buffer = new ArrayBuffer(limit + 1);
   let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel();
-      return { ok: false };
+  while (total <= limit) {
+    const { done, value } = await reader.read(new Uint8Array(buffer, total, limit + 1 - total));
+    if (value !== undefined) {
+      buffer = value.buffer as ArrayBuffer;
+      total += value.byteLength;
     }
-    chunks.push(value);
+    if (done) break;
   }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
+  if (total > limit) {
+    // Best effort: a stream that is already errored can reject the cancel.
+    await reader.cancel().catch(() => undefined);
+    return { ok: false };
   }
-  return { ok: true, bytes };
+  reader.releaseLock();
+  return { ok: true, bytes: new Uint8Array(buffer, 0, total) };
 }
 
 // A declared length above the limit is refused before any read. A missing or

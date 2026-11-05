@@ -50,7 +50,9 @@ The health document:
   it uses the fixed key `local`. The Worker reads no other request header
   than `Content-Type`, `Content-Length` and `CF-Connecting-IP`, and never
   `request.cf`.
-- The Worker reads the body as a stream and stops after 8193 bytes; a
+- The Worker reads the body as a stream with a BYOB reader that asks for at
+  most the remaining allowance + 1 byte, so it takes at most 8193 bytes from
+  the stream whatever the chunk sizes are, and then cancels it; a
   declared `Content-Length` over 8192 is refused before the read; a smaller
   declared length is not trusted.
 - A document is valid only when the validator compiled from
