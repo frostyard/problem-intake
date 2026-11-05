@@ -1,15 +1,25 @@
 # CI only (.github/workflows/glitchtip.yml): run the production compose.yaml
-# on a GitHub runner. The port moves to 127.0.0.1 and the volumes to temporary
-# folders (CI_DATA). Never use this file on TrueNAS.
+# on a GitHub runner. The port moves to 127.0.0.1, the volumes to temporary
+# folders (CI_DATA), and the env file to CI_DATA/glitchtip.env, which the job
+# writes with throwaway values. Never use this file on TrueNAS.
 services:
   postgres:
+    env_file: !override
+      - ${CI_DATA:?}/glitchtip.env
     volumes: !override
       - ${CI_DATA:?}/postgres:/var/lib/postgresql
+  migrate:
+    env_file: !override
+      - ${CI_DATA:?}/glitchtip.env
   web:
+    env_file: !override
+      - ${CI_DATA:?}/glitchtip.env
     ports: !override
       - "127.0.0.1:8000:8000"
     volumes: !override
       - ${CI_DATA:?}/uploads:/code/uploads
   worker:
+    env_file: !override
+      - ${CI_DATA:?}/glitchtip.env
     volumes: !override
       - ${CI_DATA:?}/uploads:/code/uploads

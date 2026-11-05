@@ -11,7 +11,8 @@ frostyard images and apps send opt-in problem reports, schema
 [spec](https://github.com/frostyard/core/blob/main/docs/specs/problem-report.md)).
 Plan T857 section 5 puts a Cloudflare Worker in front of a self-hosted
 GlitchTip on Brian's homelab. An IP address is personal data. GlitchTip
-retention is 80 days. Workers forbid `eval` and `new Function`. A Workers
+retention is 72 days (80 days until 2026-11-05: weekly tag partitions and the
+issue cleanup add up to 9 days, and snapshots 7 more). Workers forbid `eval` and `new Function`. A Workers
 rate-limit binding counts only over 10 or 60 seconds.
 
 ## Decision
@@ -42,8 +43,8 @@ rate-limit binding counts only over 10 or 60 seconds.
   from 1 to 4 suppressed and complementary suppression to a fixed point.
   `GET /v1/stats` serves them. An hourly cron writes the forward-failure
   counts that `GET /v1/health` serves.
-- GlitchTip runs from `glitchtip/compose.yaml` with an 80-day event,
-  transaction and file life and open sign-up off.
+- GlitchTip runs from `glitchtip/compose.yaml` with a 72-day event,
+  transaction, file, log and uptime life and open sign-up off.
 
 ## Consequences
 

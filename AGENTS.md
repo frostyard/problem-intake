@@ -40,7 +40,10 @@ These are tested; never weaken a test to pass a change.
 - **No secret in Git.** Secrets are Worker secrets (`INTAKE_BEARER`,
   `GLITCHTIP_DSNS`, `AE_READ_TOKEN`, `CF_ACCOUNT_ID`) or GitHub environment
   secrets. Tests use obvious fakes (`test-…-not-a-real-secret`,
-  `*.test.invalid`). The Compose file takes secrets only as `${NAME:?}`.
+  `*.test.invalid`). `glitchtip/compose.yaml` holds no secret and no `${`:
+  secrets and host names come from the env file on the NAS (`env_file`,
+  root 0600, names in `glitchtip/.env.example`), and no `environment` key
+  may repeat one of its names (`test/node/compose.test.mjs`).
 - **New request, no copy.** The forward to GlitchTip is a request built new
   in `src/forward.ts`, with exactly 3 headers. Never pass or clone the
   incoming request or its headers.
@@ -87,7 +90,8 @@ touches one gets `risk:high` from `.github/workflows/risk-paths-caller.yml`
 and declares tier 3; its body names each matched path and why the change is
 safe. The paths: the list, the policy, `.github/workflows/**`,
 `wrangler.jsonc`, `glitchtip/compose.yaml`, `src/forward.ts`, `src/sql.ts`,
-`src/report.ts`, `scripts/glitchtip-delete-report.sh`, `Makefile`,
+`src/report.ts`, `scripts/glitchtip-delete-report.sh`,
+`scripts/glitchtip-cleanup-proof.sh`, `Makefile`,
 `scripts/check-*.mjs`, `scripts/lib/**`, `test/node/privacy-scan.test.mjs`.
 
 **Vendored files.** `scripts/lib/risk-paths.mjs` and
