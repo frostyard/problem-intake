@@ -72,6 +72,9 @@ test("secrets are names only", () => {
 test("no key or value looks like a secret value", () => {
   const SECRET_KEY = /(token|password|passwd|secret|bearer|api[_-]?key|private|dsn|credential)/i;
   const SECRET_VALUE = /(https?:\/\/[^@/\s]+@)|(^[0-9a-f]{32,}$)|(^[A-Za-z0-9_-]{40,}$)/;
+  // A KV namespace id is 32 hex characters and is not a secret; only that
+  // exact path and shape are exempt, and the test below pins its value.
+  const KV_ID_PATH = /^\.kv_namespaces\[\d+\]\.id$/;
   const walk = (value, path) => {
     if (Array.isArray(value)) {
       value.forEach((item, i) => walk(item, `${path}[${i}]`));
@@ -83,17 +86,19 @@ test("no key or value looks like a secret value", () => {
         walk(item, `${path}.${key}`);
       }
     } else if (typeof value === "string") {
+      if (KV_ID_PATH.test(path) && /^[0-9a-f]{32}$/.test(value)) return;
       assert.doesNotMatch(value, SECRET_VALUE, `value at ${path}`);
     }
   };
   walk(config, "");
 });
 
-test("the KV id is the placeholder until Brian's PR replaces it", () => {
-  // The deploy workflow refuses this placeholder (.github/workflows/deploy.yml).
+test("the KV id is the namespace problem-intake-stats, not the placeholder", () => {
+  // The deploy workflow still refuses the placeholder (.github/workflows/deploy.yml).
+  assert.equal(config.kv_namespaces.length, 1);
   const [kv] = config.kv_namespaces;
   assert.equal(kv.binding, "STATS");
-  assert.ok(kv.id === "REPLACE_WITH_STATS_KV_NAMESPACE_ID" || /^[0-9a-f]{32}$/.test(kv.id), kv.id);
+  assert.equal(kv.id, "3dcd850dc0dc4e4081163bc49c20a410");
   const deploy = readFileSync(new URL("../../.github/workflows/deploy.yml", import.meta.url), "utf8");
   assert.ok(deploy.includes("REPLACE_WITH_STATS_KV_NAMESPACE_ID"), "the deploy workflow must check for the placeholder");
 });

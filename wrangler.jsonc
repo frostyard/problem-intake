@@ -52,9 +52,9 @@
   "kv_namespaces": [
     {
       "binding": "STATS",
-      // Placeholder: Brian creates the namespace and replaces this id by PR.
-      // The deploy workflow refuses to deploy while the placeholder is here.
-      "id": "REPLACE_WITH_STATS_KV_NAMESPACE_ID"
+      // The KV namespace problem-intake-stats (created by Brian, 2026-11-05).
+      // An id is not a secret.
+      "id": "3dcd850dc0dc4e4081163bc49c20a410"
     }
   ],
   "triggers": {
