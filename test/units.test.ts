@@ -52,8 +52,8 @@ describe("buildEvent", () => {
   it.each(Object.keys(EXAMPLES).filter((k) => k !== "count"))("tags %s with every envelope value and no IP", (kind) => {
     const report = example(kind);
     const event = buildEvent(report);
+    expect(event.tags).not.toHaveProperty("report_id");
     expect(event.tags).toMatchObject({
-      report_id: report.report_id,
       week: report.week,
       image: report.image.id,
       image_version: report.image.version,
