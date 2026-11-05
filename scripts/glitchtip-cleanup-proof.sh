@@ -37,6 +37,9 @@
 #   GLITCHTIP_ORG            the slug of the organization for the temporary
 #                            project; default the first organization
 #   DOCKER                   the docker command; default "docker"
+#   CLEANUP_PROOF_RUN        test only: the run id (8 of a-z and 0-9) instead
+#                            of a random one (CI checks that the script keeps
+#                            tag keys and values that it did not create)
 set -euo pipefail
 
 usage() {
@@ -58,12 +61,18 @@ if [[ -n "$org" && ! "$org" =~ ^[a-z0-9][a-z0-9-]{0,49}$ ]]; then
   exit 2
 fi
 
+run="${CLEANUP_PROOF_RUN:-}"
+if [[ -n "$run" && ! "$run" =~ ^[a-z0-9]{8}$ ]]; then
+  echo "error: CLEANUP_PROOF_RUN must be 8 of a-z and 0-9" >&2
+  exit 2
+fi
+
 container="${GLITCHTIP_WEB_CONTAINER:-ix-glitchtip-web-1}"
 read -r -a docker <<<"${DOCKER:-docker}"
 
 # GlitchTip's own log lines (stderr) never reach the screen: they can hold
 # any text.
-output="$("${docker[@]}" exec -i -e "MODE=$mode" -e "ORG=$org" "$container" ./manage.py shell 2>/dev/null <<'PY'
+output="$("${docker[@]}" exec -i -e "MODE=$mode" -e "ORG=$org" -e "RUN=$run" "$container" ./manage.py shell 2>/dev/null <<'PY'
 import json
 import os
 import secrets
@@ -92,7 +101,7 @@ from glitchtip.partition_manager import UUID7Helper, PartitionManager
 MODE = os.environ["MODE"]
 ORG = os.environ.get("ORG", "")
 POLL_SECONDS = 180
-run = secrets.token_hex(4)
+run = os.environ.get("RUN") or secrets.token_hex(4)
 # A tag key of this run only: the cleanup never touches another key.
 TAG = f"cleanup_proof_{run}"
 values = {"old": f"cleanup-proof-{run}-old", "new": f"cleanup-proof-{run}-new"}
@@ -338,10 +347,47 @@ finally:
 PY
 )" || true
 
-# Show only lines of the script's strict shape: each value is a number, a
-# lowercase word with underscores, or an exception type. Drop every other line.
-value='([0-9]+|[a-z_]+|[A-Z][A-Za-z]*)'
-grep -E "^(COUNT|ERROR)( [a-z_]+=$value)+\$" <<<"$output" | sed -E 's/^(COUNT|ERROR) /\1: /' || true
+# Show only the exact record layouts that the Python prints: the same fields
+# in the same order, each with its own value rule. Any other field, an extra
+# field or another value drops the whole line. The shown line is built again
+# from the parsed values, never echoed raw.
+int='(0|[1-9][0-9]{0,9})'
+stages='(setup|send|wait|backdate|maintenance|check|delete_project)'
+exception='([A-Z][A-Za-z]{0,60})'
+
+# show KIND NAME=RULE...: print "KIND: NAME=value ..." when $line has exactly
+# this layout. Each RULE has 1 group.
+show() {
+  local kind="$1" re spec i=1 shown
+  shift
+  re="^$kind"
+  for spec in "$@"; do re+=" ${spec%%=*}=${spec#*=}"; done
+  re+='$'
+  [[ "$line" =~ $re ]] || return 1
+  shown="$kind:"
+  for spec in "$@"; do
+    shown+=" ${spec%%=*}=${BASH_REMATCH[i]}"
+    i=$((i + 1))
+  done
+  echo "$shown"
+}
+
+ints() {
+  local name
+  for name in "$@"; do printf '%s\n' "$name=$int"; done
+}
+mapfile -t before_after < <(ints old_event old_tag_rows old_aggregate_rows old_issue new_event new_tag_rows new_issue)
+mapfile -t left < <(ints projects keys counters issues events tag_rows aggregate_rows index_rows hashes \
+  hourly_rows tag_values tag_keys partitions)
+
+while IFS= read -r line; do
+  show COUNT "retention_days=$int" "backdate_days=$int" "mode=(proof|no_maintenance)" ||
+    show COUNT "stored_events=$int" ||
+    show COUNT "stage=(before|after)" "${before_after[@]}" ||
+    show COUNT "stage=(left)" "${left[@]}" ||
+    show ERROR "stage=$stages" "type=$exception" ||
+    true
+done <<<"$output"
 result="$(sed -En 's/^STATUS result=(PASS|FAIL|LEFTOVER|TIMEOUT|ERROR)$/\1/p' <<<"$output" | tail -n 1)"
 case "$result" in
   PASS)
