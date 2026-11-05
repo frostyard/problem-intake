@@ -123,14 +123,16 @@ jobs:
             body="$(mktemp)"
             for _ in $(seq 1 60); do
               if curl -fsS -H "Authorization: Bearer $CI_TOKEN" "$url" -o "$body"; then
+                # The caller's || turns off set -e here: check the status by hand.
+                local rc=0
                 REPORT="$1" node -e '
                   const e = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
                   const tags = Object.fromEntries((e.tags || []).map((t) => [t.key, t.value]));
                   if (tags.report_id !== process.env.REPORT) { console.error("no report_id tag"); process.exit(1); }
                   process.stdout.write(String(e.groupID));
-                ' "$body"
+                ' "$body" || rc=$?
                 rm -f "$body"
-                return 0
+                return "$rc"
               fi
               sleep 5
             done
