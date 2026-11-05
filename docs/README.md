@@ -17,6 +17,7 @@ Docs are split by the question they answer:
 - [0001 — Record architecture decisions](adr/0001-record-architecture-decisions.md)
 - [0002 — Agent-portable instruction surface](adr/0002-agent-portable-instruction-surface.md)
 - [0003 — The intake Worker validates, strips and forwards problem reports](adr/0003-intake-worker-validates-strips-and-forwards.md)
+- [0004 — GlitchTip reads its secrets from an env file and keeps data 72 days](adr/0004-glitchtip-env-file-and-72-day-retention.md)
 
 ### Design
 

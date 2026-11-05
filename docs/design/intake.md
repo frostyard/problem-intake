@@ -98,6 +98,7 @@ cron Monday ──► SQL API ──► KV aggregates/<week>.json, aggregates/in
 ## References
 
 - Rationale: [ADR-0003](../adr/0003-intake-worker-validates-strips-and-forwards.md),
+  [ADR-0004](../adr/0004-glitchtip-env-file-and-72-day-retention.md) (GlitchTip env file, 72-day retention),
   core [ADR-0069](https://github.com/frostyard/core/blob/main/docs/adr/0069-report-problems-local-first-opt-in-with-one-sender-per-host.md)
 - Contracts: [specs/intake-api.md](../specs/intake-api.md),
   [specs/analytics-points.md](../specs/analytics-points.md),

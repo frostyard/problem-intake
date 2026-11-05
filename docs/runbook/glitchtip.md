@@ -239,6 +239,7 @@ needed: the Worker answers 502 and senders retry the next day.
 
 ## References
 
-- Rationale: [ADR-0003](../adr/0003-intake-worker-validates-strips-and-forwards.md)
+- Rationale: [ADR-0003](../adr/0003-intake-worker-validates-strips-and-forwards.md),
+  [ADR-0004](../adr/0004-glitchtip-env-file-and-72-day-retention.md) (env file, 72-day retention)
 - Context: [design/intake.md](../design/intake.md)
 - Deploy: [deploy.md](deploy.md)
