@@ -1,0 +1,29 @@
+{
+  "name": "problem-intake",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:validator": "node scripts/build-validator.mjs",
+    "check": "npm run typecheck && npm run types:check && npm run check:validator && npm run test:node && npm run test:coverage && npm run deploy:dry-run",
+    "check:validator": "node scripts/build-validator.mjs --check",
+    "deploy:dry-run": "node scripts/dry-run.mjs",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:node": "node --test test/node/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types worker-configuration.d.ts --include-runtime false",
+    "types:check": "wrangler types --include-runtime false --check"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.5.1",
+    "@cloudflare/workers-types": "5.20261104.1",
+    "@vitest/coverage-istanbul": "5.1.0",
+    "ajv": "8.20.0",
+    "jsonc-parser": "3.3.1",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0",
+    "wrangler": "4.157.0",
+    "yaml": "2.9.1"
+  }
+}
