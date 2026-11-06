@@ -2121,7 +2121,7 @@ test("a day in a frame files no issue and the run still writes the health issue"
 });
 
 test("the production source reader sends the token and reads the labels blob", async () => {
-  const { createSources } = await import("../../scripts/triage/lib/sources.mjs");
+  const { createDelivery: createSources } = await import("../../scripts/triage/lib/delivery.mjs");
   const token = "test-token-not-a-real-secret";
   const sha = "a".repeat(40);
   const seen = [];
@@ -2175,7 +2175,7 @@ test("the production source reader sends the token and reads the labels blob", a
 });
 
 test("the sysext index read: a 404 is no version, a 500 is source_unavailable", async () => {
-  const { createSources, SourceError } = await import("../../scripts/triage/lib/sources.mjs");
+  const { createDelivery: createSources, DeliveryError: SourceError } = await import("../../scripts/triage/lib/delivery.mjs");
   const config = { sources: null, registryUrl: "https://ghcr.io/", indexUrl: "https://repository.frostyard.org/ext/" };
   const sha = "b".repeat(64);
   const fetchStub = async (url) => {

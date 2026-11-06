@@ -33,7 +33,7 @@ import {
 import { emptyPublished, newEntry, readPublished, trackedKeys, writePublished } from "./lib/published.mjs";
 import { ensureStateDir, StateError, utcDay } from "./lib/state.mjs";
 import * as health from "./lib/health.mjs";
-import { createSources, dayOf, SourceError } from "./lib/sources.mjs";
+import { createDelivery, dayOf, DeliveryError } from "./lib/delivery.mjs";
 
 const MACHINE = "frostyard-machines";
 const LABEL = "problem-report";
@@ -90,7 +90,7 @@ function errorCode(error) {
   if (error instanceof ConfigError) return `config:${error.code}`;
   if (error instanceof StateError) return `state:${error.code}`;
   if (error instanceof GitHubError) return `github:${error.code}${error.status === null ? "" : `:${error.status}`}`;
-  if (error instanceof SourceError) return "source:source_unavailable";
+  if (error instanceof DeliveryError) return "source:source_unavailable";
   return "run_failed";
 }
 
@@ -206,7 +206,7 @@ export async function main({ now = new Date(), env = process.env, hooks = {} } =
       clock,
       deadlineAt,
     }),
-    sources: createSources({ config }),
+    sources: createDelivery({ config }),
     deferred: {},
     stopped: null,
     actions: 0,
@@ -626,7 +626,7 @@ async function restoreReleased(run, entry) {
     entry.feature_index = versions;
     return true;
   } catch (error) {
-    if (error instanceof SourceError) {
+    if (error instanceof DeliveryError) {
       entry.released_day = null;
       entry.feature_index = null;
       defer(run, "recovery");
@@ -854,7 +854,7 @@ async function stepMerged(run, published, key, entry, info) {
     else if (parsed.kind === "app_problem") found = await appBoundary(run, entry, info);
     else found = await imageBoundary(run, info, parsed.images);
   } catch (error) {
-    if (error instanceof SourceError) {
+    if (error instanceof DeliveryError) {
       defer(run, "recovery");
       return;
     }

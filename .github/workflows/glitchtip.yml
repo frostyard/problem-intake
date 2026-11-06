@@ -5,8 +5,11 @@
 # with the runbook's script, prove that no table holds its report_id
 # (pg_dump), and prove that the other event and the issue stay. Then prove the nightly cleanup with
 # scripts/glitchtip-cleanup-proof.sh: it fails with no cleanup, and passes
-# with GlitchTip's real nightly task. All secrets are throwaway values made in
-# the job, in the env file that compose.ci.yaml points to.
+# with GlitchTip's real nightly task. The reader proof comes between the 2
+# parts: a user with a read-only token, 4 more problems, and scripts/triage/read.mjs
+# against the test instance, so the scopes of the read token and the facts it
+# writes are tested. All secrets are throwaway values made in the job, in the
+# env file that compose.ci.yaml points to.
 name: GlitchTip runbook
 
 on:
@@ -14,6 +17,9 @@ on:
     paths:
       - "glitchtip/**"
       - "scripts/glitchtip-*"
+      - "scripts/triage/**"
+      - "triage/**"
+      - "test/fixtures/triage/**"
       - "src/envelope.ts"
       - ".github/workflows/glitchtip.yml"
   merge_group: {}
@@ -165,6 +171,98 @@ jobs:
           GLITCHTIP_WEB_CONTAINER="$($COMPOSE ps -q web)"
           scripts/glitchtip-delete-report.sh --check "$REPORT_ID"
           scripts/glitchtip-delete-report.sh --check "$KEEP_ID"
+
+      - name: Make a reader user with a read-only token
+        run: |
+          set -euo pipefail
+          out="$($COMPOSE exec -T -e GLITCHTIP_CI=true web ./manage.py shell -c "$(cat scripts/glitchtip-ci-reader.py)")"
+          reader="$(sed -n 's/^READER //p' <<<"$out")"
+          [[ "$reader" == "is_superuser=False is_staff=False usable_password=False role=member scopes=event:read,project:read" ]] ||
+            { echo "the reader user is: $reader"; exit 1; }
+          token="$(sed -n 's/^CI_READ_TOKEN=//p' <<<"$out")"
+          [[ -n "$token" ]] || { echo "no read token"; exit 1; }
+          echo "::add-mask::$token"
+          echo "CI_READ_TOKEN=$token" >> "$GITHUB_ENV"
+
+      - name: Send 4 more problems, 1 for each row of the reader
+        run: |
+          set -euo pipefail
+          # 1 allowlisted unit, 1 ChairLift code at its tag, 1 ChairLift code of
+          # an app version with no tag (another code, or it would join the
+          # issue of the first), and 1 update failure of the network.
+          for name in unit_failed app_problem app_problem_untagged update_stage_failed; do
+            id="$(node -e 'process.stdout.write(crypto.randomUUID())')"
+            node scripts/glitchtip-send-event.mjs "$id" "test/fixtures/triage/ci/$name.json"
+            case "$name" in
+              unit_failed) echo "READER_UNIT_ID=$id" >> "$GITHUB_ENV" ;;
+              app_problem) echo "READER_APP_ID=$id" >> "$GITHUB_ENV" ;;
+              app_problem_untagged) echo "READER_UNTAGGED_ID=$id" >> "$GITHUB_ENV" ;;
+              update_stage_failed) echo "READER_STAGE_ID=$id" >> "$GITHUB_ENV" ;;
+            esac
+          done
+
+      - name: Wait until the issue list holds 5 issues
+        run: |
+          set -euo pipefail
+          count() {
+            node -e '
+              let text = "";
+              process.stdin.on("data", (chunk) => { text += chunk; });
+              process.stdin.on("end", () => {
+                try {
+                  const rows = JSON.parse(text);
+                  process.stdout.write(String(Array.isArray(rows) ? rows.length : 0));
+                } catch {
+                  process.stdout.write("0");
+                }
+              });
+            '
+          }
+          for _ in $(seq 1 60); do
+            body="$(curl -fsS -H "Authorization: Bearer $CI_TOKEN" "http://127.0.0.1:8000/api/0/organizations/frostyard/issues/" || true)"
+            issues="$(printf '%s' "$body" | count)"
+            [[ "$issues" == 5 ]] && { echo "the issue list holds 5 issues"; exit 0; }
+            sleep 5
+          done
+          $COMPOSE logs --tail 100 web worker
+          echo "the issue list holds $issues issues, want 5"
+          exit 1
+
+      - name: Run the reader against the test GlitchTip
+        run: |
+          set -euo pipefail
+          src="$(mktemp -d)"
+          node test/fixtures/triage/build-sources.mjs "$src"
+          state="$(mktemp -d)"
+          # The token file and its creation day live in 1 folder of their own,
+          # mode 0600, exactly as on the team VM.
+          home="$(mktemp -d)"
+          printf '%s\n' "$CI_READ_TOKEN" > "$home/glitchtip-read.token"
+          chmod 600 "$home/glitchtip-read.token"
+          printf '%s\n' "$(date -u +%F)" > "$home/glitchtip-read.created"
+          # The committed cutoff stays null; this run reads today's issues.
+          printf '%s\n' '{"first_seen_cutoff": "2026-01-01T00:00:00Z"}' > triage/config.json
+          TRIAGE_TEST=1 \
+          TRIAGE_GLITCHTIP_URL=http://localhost:8000/api/0/ \
+          TRIAGE_TOKEN_FILE="$home/glitchtip-read.token" \
+          TRIAGE_STATE_DIR="$state" \
+          TRIAGE_SOURCES="$src" \
+            node scripts/triage/read.mjs
+          echo "TRIAGE_STATE_DIR=$state" >> "$GITHUB_ENV"
+
+      - name: Check the facts of the reader
+        run: |
+          set -euo pipefail
+          CI_REPORT_IDS="$REPORT_ID $KEEP_ID $READER_UNIT_ID $READER_APP_ID $READER_UNTAGGED_ID $READER_STAGE_ID" \
+            node test/fixtures/triage/ci/check-facts.mjs "$TRIAGE_STATE_DIR/facts.json"
+
+      - name: Prove that the read token cannot change an issue
+        run: |
+          set -euo pipefail
+          status="$(curl -sS -o /dev/null -w '%{http_code}' -X PUT \
+            -H "Authorization: Bearer $CI_READ_TOKEN" -H "Content-Type: application/json" \
+            -d '{"status":"resolved"}' "http://127.0.0.1:8000/api/0/issues/$ISSUE_ID/")"
+          [[ "$status" == 403 ]] || { echo "a PUT with the read token answers $status, want 403"; exit 1; }
 
       - name: Delete 1 report with the runbook script
         run: GLITCHTIP_WEB_CONTAINER="$($COMPOSE ps -q web)" scripts/glitchtip-delete-report.sh "$REPORT_ID"

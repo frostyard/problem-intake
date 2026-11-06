@@ -24,11 +24,21 @@ const FEATURE = new RegExp(schema.$defs.sysext_update_failed.properties.feature.
 const REPO = /^frostyard\/[a-z0-9-]+$/;
 const SEED_HEADER = /^# Seed: frostyard\/snosi ([0-9a-f]{40}), scripts\/triage\/seed-allow\.mjs\. A new entry is a PR, never a value from a report\.$/;
 
+// The first day the privacy page section `public-bug-reports` was live
+// (frostyard/frostyard-org dbc9b1d, merged 2026-11-06T19:35:41Z). The section is
+// the notice, so no cutoff may come before it (docs/specs/triage.md).
+const SECTION_LIVE_DAY = "2026-11-06";
+
 test("triage/config.json holds the publication cutoff and nothing else", () => {
   const config = JSON.parse(read("triage/config.json"));
   assert.deepEqual(Object.keys(config), ["first_seen_cutoff"]);
   const cutoff = config.first_seen_cutoff;
   assert.ok(cutoff === null || /^\d{4}-\d{2}-\d{2}T00:00:00Z$/.test(cutoff), `bad cutoff: ${cutoff}`);
+  if (cutoff === null) return;
+  // A real calendar day: Date rolls 2026-02-30 over to March, so the round trip differs.
+  assert.equal(new Date(cutoff).toISOString(), cutoff.replace("Z", ".000Z"), `not a calendar day: ${cutoff}`);
+  const day = cutoff.slice(0, 10);
+  assert.ok(day >= SECTION_LIVE_DAY, `cutoff ${day} is before the day the privacy section went live (${SECTION_LIVE_DAY})`);
 });
 
 test("triage/routes.json routes every filed kind and files the rest", () => {
