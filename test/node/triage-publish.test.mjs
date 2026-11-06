@@ -563,15 +563,33 @@ test("assertIssueBody renders an app problem with code, frames and a location", 
       }),
     /frames_not_public/,
   );
+  // A Go panic with no frames, and a Rust panic with no location, are filed
+  // with app_id, runtime and component only.
+  for (const runtime of ["go", "rust"]) {
+    const bare = assertIssueBody({
+      ...base,
+      fields: { app_id: "org.frostyard.ChairLift", runtime, component: "gui" },
+      frames: [],
+      location: null,
+    });
+    assert.equal(
+      bare.body.split("\n").slice(1, 7).join("\n"),
+      ["kind: app_problem", "class: panic", "app_id: org.frostyard.ChairLift", `runtime: ${runtime}`, "component: gui", "version: 0.15.0"].join("\n"),
+    );
+    assert.doesNotMatch(bare.body, /^(frames|location):/m);
+    assert.match(bare.body, /^Problem key: 3f2a1b4c5d6e4f70$/m);
+  }
+  // A class error still needs its code.
   assert.throws(
     () =>
       assertIssueBody({
         ...base,
+        class: "error",
         fields: { app_id: "org.frostyard.ChairLift", runtime: "go", component: "gui" },
         frames: [],
         location: null,
       }),
-    /frames_missing/,
+    /code_missing/,
   );
 });
 
@@ -1359,14 +1377,16 @@ test("a crash after a reopen reopens nothing twice", async () => {
     },
   };
   assert.equal(await run(world, { hooks: crash }), 1);
+  // The reopen landed before the crash, and then the comment: the state is
+  // cycle 2 and the issue is open. The next run repeats no action.
   assert.equal(issues(world, "frostyard/chairlift")[0].state, "open");
-  assert.deepEqual(commentBodies(world, "frostyard/chairlift", number).filter((body) => body.includes("step=regressed")), []);
+  assert.equal(commentBodies(world, "frostyard/chairlift", number).filter((body) => body.includes("step=regressed")).length, 1);
+  assert.equal(readPublished(world).keys[KEY].cycle, 2);
 
   resetCalls(world);
   assert.equal(await run(world), 0);
+  assert.deepEqual(commentPosts(world), []);
   assert.deepEqual(statePatches(world), []);
-  const regressed = commentBodies(world, "frostyard/chairlift", number).filter((body) => body.includes("step=regressed"));
-  assert.equal(regressed.length, 1);
   assert.equal(readPublished(world).keys[KEY].cycle, 2);
 });
 
@@ -1832,14 +1852,14 @@ test("a failed regressed comment changes no state and repeats no cycle", async (
     stateReason: "COMPLETED",
     closedAt: "2026-11-20T12:00:00Z",
   });
-  // The reopen works; the comment POST fails with HTTP 500.
+  // The comment POST fails with HTTP 500: the issue is never reopened.
   const state = ghState(world);
   state.failCommentPost = 1;
   writeGh(world, state);
   writeFacts(world, factsDoc({ problems: [problem], watched: [{ key: KEY, coverage: "complete" }] }));
 
   assert.equal(await run(world), 1);
-  assert.equal(issues(world, "frostyard/chairlift")[0].state, "open");
+  assert.equal(issues(world, "frostyard/chairlift")[0].state, "closed");
   // The comment never landed, so the entry still says released, cycle 1.
   const failed = readPublished(world).keys[KEY];
   assert.equal(failed.cycle, 1);
@@ -1849,7 +1869,7 @@ test("a failed regressed comment changes no state and repeats no cycle", async (
 
   resetCalls(world);
   assert.equal(await run(world), 0);
-  assert.deepEqual(statePatches(world), []);
+  assert.equal(statePatches(world).length, 1);
   const regressed = commentBodies(world, "frostyard/chairlift", number).filter((body) => body.includes("step=regressed"));
   assert.equal(regressed.length, 1);
   assert.ok(regressed[0].startsWith(markerOf({ key: KEY, cycle: 2, step: "regressed", boundary: "app:0.15.0" })));
@@ -2039,4 +2059,365 @@ test("the newest app version of an issue body is a semver maximum", async () => 
 
   assert.equal(await run(world), 0);
   assert.ok(issues(world, "frostyard/chairlift")[0].body.includes("version: 0.10.0\n"));
+});
+
+// ---------------------------------------------------------------------------
+// The blocking points of the cross-review
+// ---------------------------------------------------------------------------
+
+test("a day in a Fixed in feature version writes no comment and defers the key", async () => {
+  const world = makeWorld({ labels: { "frostyard/snosi": ["problem-report"] } });
+  const problem = sysextProblem({ feature: "foo", featureVersion: "1.2" });
+  const { number } = setupTracked(world, problem, {
+    closed: true,
+    stateReason: "COMPLETED",
+    closedAt: "2026-11-20T10:00:00Z",
+    extraComments: [
+      { author: "a-member", association: "MEMBER", body: "Fixed in: feature foo 2026-11-20", createdAt: "2026-11-20T11:00:00Z" },
+    ],
+  });
+  // The index lists the version, so the boundary would be a day.
+  setSums(world, "foo", ["1.2", "2026-11-20"]);
+  writeFacts(world, factsDoc({ problems: [] }));
+
+  assert.equal(await run(world), 0);
+  assert.deepEqual(commentPosts(world), []);
+  assert.equal(readHealth(world).runs.at(-1).deferred.guard, 1);
+  assert.equal(readPublished(world).keys[KEY].state, "merged");
+  assert.equal(commentBodies(world, "frostyard/snosi", number).filter((body) => body.includes("step=released")).length, 0);
+});
+
+test("a day in a frame files no issue and the run still writes the health issue", async () => {
+  const world = makeWorld({ labels: { "frostyard/chairlift": ["problem-report"] } });
+  const problem = appProblem({
+    cls: "panic",
+    observations: [observation({ image: "snow", version: "0.15.0" })],
+    frames: ["github.com/frostyard/chairlift/internal/snapshot2026-11-20.Foo"],
+  });
+  writeFacts(world, factsDoc({ problems: [problem] }));
+
+  assert.equal(await run(world), 0);
+  assert.deepEqual(issuePosts(world), []);
+  assert.equal(readHealth(world).runs.at(-1).deferred.guard, 1);
+  assert.equal(ghState(world).repos["frostyard/problem-intake"].issues.length, 1);
+});
+
+test("the production source reader sends the token and reads the labels blob", async () => {
+  const { createSources } = await import("../../scripts/triage/lib/sources.mjs");
+  const token = "test-token-not-a-real-secret";
+  const sha = "a".repeat(40);
+  const seen = [];
+  const labels = {
+    "org.opencontainers.image.source": `https://github.com/frostyard/snosi/blob/${sha}/mkosi.conf`,
+    "org.opencontainers.image.created": "2026-11-20T11:30:00Z",
+  };
+  const json = (value) => new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
+  const fetchStub = async (url, options = {}) => {
+    seen.push({ url: String(url), headers: options.headers ?? {} });
+    const at = String(url);
+    if (at.includes("ghcr.io/token?")) return json({ token });
+    if (at.includes("/tags/list") && !at.includes("page=2")) {
+      return new Response(JSON.stringify({ tags: ["20261105093000"] }), {
+        status: 200,
+        headers: { link: '<https://ghcr.io/v2/frostyard/snow/tags/list?page=2>; rel="next"' },
+      });
+    }
+    if (at.includes("page=2")) return json({ tags: ["20261120093000"] });
+    if (at.includes("/manifests/20261120093000")) {
+      return json({
+        manifests: [
+          { digest: "sha256:arm", platform: { os: "linux", architecture: "arm64" } },
+          { digest: "sha256:amd", platform: { os: "linux", architecture: "amd64" } },
+        ],
+      });
+    }
+    if (at.endsWith("/manifests/sha256:amd")) return json({ config: { digest: "sha256:blob" } });
+    if (at.includes("/blobs/sha256:blob")) return json({ architecture: "amd64", config: { Labels: labels } });
+    return new Response("", { status: 404 });
+  };
+  const sources = createSources({
+    config: { sources: null, registryUrl: "https://ghcr.io/", indexUrl: "https://repository.frostyard.org/ext/" },
+    fetch: fetchStub,
+  });
+
+  assert.deepEqual(await sources.listTags("snow"), ["20261105093000", "20261120093000"]);
+  assert.ok(seen[0].url.includes("token?scope=repository:frostyard/snow:pull"), seen[0].url);
+  const lists = seen.filter((entry) => entry.url.includes("/tags/list"));
+  assert.equal(lists.length, 2);
+  for (const entry of lists) assert.equal(entry.headers.authorization, `Bearer ${token}`, entry.url);
+
+  assert.deepEqual(await sources.imageLabels("snow", "20261120093000"), {
+    sourceSha: sha,
+    created: "2026-11-20T11:30:00Z",
+  });
+  // The OCI index gives the linux/amd64 manifest, and the labels are in
+  // `config.Labels` of the config blob.
+  assert.ok(seen.some((entry) => entry.url.endsWith("/manifests/sha256:amd")));
+  assert.ok(seen.some((entry) => entry.url.endsWith("/blobs/sha256:blob")));
+});
+
+test("the sysext index read: a 404 is no version, a 500 is source_unavailable", async () => {
+  const { createSources, SourceError } = await import("../../scripts/triage/lib/sources.mjs");
+  const config = { sources: null, registryUrl: "https://ghcr.io/", indexUrl: "https://repository.frostyard.org/ext/" };
+  const sha = "b".repeat(64);
+  const fetchStub = async (url) => {
+    const at = String(url);
+    if (at.endsWith("/ext/gamma/SHA256SUMS")) {
+      return new Response(`${sha}  gamma_1.2_x86-64.raw\n${sha}  gamma_1.3_x86-64.raw\n`, { status: 200 });
+    }
+    if (at.endsWith("/ext/delta/SHA256SUMS")) return new Response("", { status: 404 });
+    return new Response("", { status: 500 });
+  };
+  const sources = createSources({ config, fetch: fetchStub });
+  assert.deepEqual(await sources.featureVersions("gamma"), ["1.2", "1.3"]);
+  assert.deepEqual(await sources.featureVersions("delta"), []);
+  await assert.rejects(() => sources.featureVersions("epsilon"), (error) => error instanceof SourceError && error.code === "source_unavailable");
+});
+
+test("a marker older than the last 100 comments is still read", async () => {
+  const world = makeWorld({ labels: { "frostyard/snosi": ["problem-report"] } });
+  const problem = unitProblem();
+  const built = issueFor(problem);
+  const comments = [
+    { author: "frostyard-machines", association: "MEMBER", body: markerOf({ key: KEY, cycle: 1, step: "filed" }), createdAt: "2026-11-18T00:00:00Z" },
+    {
+      author: "frostyard-machines",
+      association: "MEMBER",
+      body: markerOf({ key: KEY, cycle: 1, step: "released", boundary: "image:snow:20261120113000" }),
+      createdAt: "2026-11-19T00:00:00Z",
+    },
+  ];
+  for (let i = 0; i < 120; i += 1) {
+    comments.push({ author: "a-drive-by", association: "NONE", body: `chatter ${i}`, createdAt: "2026-11-20T00:00:00Z" });
+  }
+  addIssue(world, "frostyard/snosi", { number: 1, title: built.title, body: built.body, comments });
+  setRegistry(world, "snow", { tags: ["20261120113000"], labels: { "20261120113000": imageLabels("1".repeat(40), "2026-11-20T11:30:00Z") } });
+  writePublishedFile(world, publishedDoc({ [KEY]: issueEntry({ number: 1, marker: markerOf({ key: KEY, cycle: 1, step: "filed" }) }) }));
+  writeFacts(world, factsDoc({ problems: [], watched: [{ key: KEY, coverage: "complete" }] }));
+
+  assert.equal(await run(world), 0);
+  const published = readPublished(world);
+  assert.equal(published.keys[KEY].state, "released");
+  assert.equal(published.keys[KEY].boundary, "image:snow:20261120113000");
+  assert.equal(published.keys[KEY].released_day, "2026-11-20");
+  assert.deepEqual(commentPosts(world), []);
+});
+
+test("the rebuild search asks for every job issue of the organization", async () => {
+  const world = makeWorld({ labels: { "frostyard/snosi": ["problem-report"] } });
+  writeFacts(world, factsDoc({}));
+
+  assert.equal(await run(world), 0);
+  const rebuild = calls(world, "Problem key:").filter((call) => call[0] === "search");
+  assert.equal(rebuild.length, 1);
+  assert.equal(rebuild[0][rebuild[0].indexOf("--limit") + 1], "1000");
+});
+
+test("a release far back is found by reading every page", async () => {
+  const world = makeWorld({ labels: { "frostyard/chairlift": ["problem-report"] } });
+  const problem = appProblem();
+  setupTracked(world, problem, {
+    repo: "frostyard/chairlift",
+    closed: true,
+    stateReason: "COMPLETED",
+    closedAt: "2026-11-20T10:00:00Z",
+    closer: { type: "PullRequest", sha: "fix1" },
+  });
+  // 150 releases, newest first: the fix is in the oldest 1 (page 2).
+  const newest = Date.parse("2026-12-31T12:00:00Z");
+  const releases = Array.from({ length: 150 }, (_, i) => ({
+    tag_name: `v1.${i}.0`,
+    published_at: new Date(newest - i * 3_600_000).toISOString(),
+    draft: false,
+    prerelease: false,
+  }));
+  setRelease(world, "frostyard/chairlift", releases);
+  setCompare(world, "frostyard/chairlift", { "fix1...v1.149.0": "ahead" });
+  writeFacts(world, factsDoc({ problems: [] }));
+
+  assert.equal(await run(world), 0);
+  const published = readPublished(world);
+  assert.equal(published.keys[KEY].state, "released");
+  assert.equal(published.keys[KEY].boundary, "app:1.149.0");
+  assert.equal(calls(world, "releases?per_page=100&page=2").length, 1);
+});
+
+test("a regression whose reopen failed is reopened once, with no second comment", async () => {
+  const world = makeWorld({ labels: { "frostyard/chairlift": ["problem-report"] } });
+  const problem = appProblem({ observations: [observation({ image: "snow", version: "0.16.0", lastSeenDay: "2026-11-21" })] });
+  const { number } = setupTracked(world, problem, {
+    repo: "frostyard/chairlift",
+    step: "released",
+    state: "released",
+    boundary: "app:0.15.0",
+    releasedDay: "2026-11-20",
+    closed: true,
+    stateReason: "COMPLETED",
+    closedAt: "2026-11-20T12:00:00Z",
+  });
+  const state = ghState(world);
+  state.failReopen = 1;
+  writeGh(world, state);
+  writeFacts(world, factsDoc({ problems: [problem], watched: [{ key: KEY, coverage: "complete" }] }));
+
+  // The comment lands, the reopen fails: exit 1.
+  assert.equal(await run(world), 1);
+  assert.equal(issues(world, "frostyard/chairlift")[0].state, "closed");
+  assert.equal(commentBodies(world, "frostyard/chairlift", number).filter((body) => body.includes("step=regressed")).length, 1);
+  assert.equal(readPublished(world).keys[KEY].cycle, 2);
+  assert.equal(readPublished(world).keys[KEY].state, "filed");
+
+  // The next run has facts without the observation: it reopens, once.
+  resetCalls(world);
+  writeFacts(world, factsDoc({ problems: [], watched: [{ key: KEY, coverage: "complete" }] }));
+  assert.equal(await run(world), 0);
+  assert.equal(statePatches(world).length, 1);
+  assert.equal(issues(world, "frostyard/chairlift")[0].state, "open");
+  assert.equal(commentBodies(world, "frostyard/chairlift", number).filter((body) => body.includes("step=regressed")).length, 1);
+  assert.equal(readPublished(world).keys[KEY].cycle, 2);
+  assert.equal(readPublished(world).keys[KEY].state, "filed");
+});
+
+test("the run has 10 comments or reopens in all, the filed markers included", async () => {
+  const world = makeWorld({
+    labels: { "frostyard/snosi": ["problem-report"], "frostyard/chairlift": ["problem-report"], "frostyard/nsl": ["problem-report"] },
+  });
+  const keys = [];
+  const entries = {};
+  for (let i = 1; i <= 9; i += 1) {
+    const key = keyOf(i);
+    keys.push(key);
+    const problem = unitProblem({ key, unit: `unit-${i}.service` });
+    const built = issueFor(problem);
+    const marker = markerOf({ key, cycle: 1, step: "released", boundary: "image:snow:20261120093000" });
+    addIssue(world, "frostyard/snosi", {
+      number: i,
+      title: built.title,
+      body: built.body,
+      comments: [{ author: "frostyard-machines", association: "MEMBER", body: marker, createdAt: "2026-11-19T00:00:00Z" }],
+    });
+    entries[key] = issueEntry({
+      number: i,
+      state: "released",
+      boundary: "image:snow:20261120093000",
+      releasedDay: "2026-11-20",
+      coveredDays: 13,
+      lastCountedDay: "2026-11-20",
+      marker,
+    });
+  }
+  // 1 tracked key with no marker at all, and 3 new problems.
+  const bare = unitProblem({ key: keyOf(10), unit: "bare.service" });
+  const bareIssue = issueFor(bare);
+  addIssue(world, "frostyard/snosi", { number: 10, title: bareIssue.title, body: bareIssue.body });
+  entries[keyOf(10)] = issueEntry({ number: 10, marker: null });
+  // 3 new problems in 3 repositories: 1 per repository, so the per-repository
+  // cap of the run does not decide the result.
+  const fresh = [
+    unitProblem({ key: keyOf(11), unit: "new-one.service", firstSeenDay: "2026-11-20" }),
+    appProblem({ key: keyOf(12), repo: "frostyard/chairlift", observations: [observation({ image: "snow", version: "0.15.0" })], firstSeenDay: "2026-11-20" }),
+    appProblem({ key: keyOf(13), repo: "frostyard/nsl", appId: "org.frostyard.nsl", observations: [observation({ image: "snow", version: "0.15.0" })], firstSeenDay: "2026-11-20" }),
+  ];
+  writePublishedFile(world, publishedDoc(entries));
+  writeFacts(world, factsDoc({ problems: fresh, watched: keys.map((key) => ({ key, coverage: "complete" })) }));
+
+  assert.equal(await run(world), 0);
+  const actions = commentPosts(world).length + statePatches(world).length;
+  assert.equal(actions, 10);
+  assert.deepEqual(issuePosts(world), []);
+  assert.equal(readHealth(world).runs.at(-1).deferred.new_issues, 3);
+
+  // The rest is done by the next run.
+  resetCalls(world);
+  assert.equal(await run(world), 0);
+  assert.equal(issuePosts(world).length, 3);
+});
+
+test("a fix that shipped before the issue closed is released at the closer date", async () => {
+  // App: the fix commit is from 2026-11-10, the release from 2026-11-12, and
+  // the issue closed on 2026-11-20.
+  const app = makeWorld({ labels: { "frostyard/chairlift": ["problem-report"] } });
+  const problem = appProblem();
+  setupTracked(app, problem, {
+    repo: "frostyard/chairlift",
+    closed: true,
+    stateReason: "COMPLETED",
+    closedAt: "2026-11-20T10:00:00Z",
+    closer: { type: "PullRequest", sha: "fix1" },
+  });
+  setRelease(app, "frostyard/chairlift", [{ tag_name: "v0.15.0", published_at: "2026-11-12T09:00:00Z", draft: false, prerelease: false }]);
+  setCompare(app, "frostyard/chairlift", { "fix1...v0.15.0": "ahead" });
+  const appState = ghState(app);
+  appState.repos["frostyard/chairlift"].commits = { fix1: "2026-11-10T09:00:00Z" };
+  writeGh(app, appState);
+  writeFacts(app, factsDoc({ problems: [] }));
+  assert.equal(await run(app), 0);
+  assert.equal(readPublished(app).keys[KEY].state, "released");
+  assert.equal(readPublished(app).keys[KEY].boundary, "app:0.15.0");
+  assert.equal(readPublished(app).keys[KEY].released_day, "2026-11-12");
+
+  // Image: the tag is from 2026-11-12, and the issue closed on 2026-11-20.
+  const image = makeWorld({ labels: { "frostyard/snosi": ["problem-report"] } });
+  setupTracked(image, unitProblem(), {
+    closed: true,
+    stateReason: "COMPLETED",
+    closedAt: "2026-11-20T10:00:00Z",
+    closer: { type: "PullRequest", sha: "fix1" },
+  });
+  setRegistry(image, "snow", {
+    tags: ["20261112093000"],
+    labels: { "20261112093000": imageLabels("2".repeat(40), "2026-11-12T09:30:00Z") },
+  });
+  const imageState = ghState(image);
+  imageState.repos["frostyard/snosi"].commits = { fix1: "2026-11-10T09:00:00Z" };
+  imageState.repos["frostyard/snosi"].compare = { [`fix1...${"2".repeat(40)}`]: "identical" };
+  writeGh(image, imageState);
+  writeFacts(image, factsDoc({ problems: [] }));
+  assert.equal(await run(image), 0);
+  assert.equal(readPublished(image).keys[KEY].state, "released");
+  assert.equal(readPublished(image).keys[KEY].boundary, "image:snow:20261112093000");
+});
+
+test("a health comment of the day is written once, also after a crash", async () => {
+  // The status comment.
+  const status = makeWorld({ labels: {} });
+  writeHealthFile(status, {
+    schema: "frostyard.problem-triage-health/1",
+    runs: [{ day: "2026-11-20", status: "ok", notes: [], held: {}, deferred: {}, rotation_due: false }],
+    last_read: {},
+    issue_keys: {},
+  });
+  writeFacts(status, factsDoc({ status: "auth" }));
+  const crashStatus = {
+    afterAction(name) {
+      if (name === "health-comment") throw new Error("crash after the status comment");
+    },
+  };
+  assert.equal(await run(status, { hooks: crashStatus }), 1);
+  assert.equal(commentPosts(status).length, 1);
+  resetCalls(status);
+  assert.equal(await run(status), 0);
+  assert.equal(commentPosts(status).length, 0);
+  assert.equal(commentBodies(status, "frostyard/problem-intake", 1).length, 1);
+
+  // The rotation comment.
+  const rotation = makeWorld({ labels: {} });
+  writeHealthFile(rotation, {
+    schema: "frostyard.problem-triage-health/1",
+    runs: [{ day: "2026-11-20", status: "ok", notes: [], held: {}, deferred: {}, rotation_due: false }],
+    last_read: {},
+    issue_keys: {},
+  });
+  writeFacts(rotation, factsDoc({ tokenAgeDays: 335 }));
+  const crashRotation = {
+    afterAction(name) {
+      if (name === "health-rotation") throw new Error("crash after the rotation comment");
+    },
+  };
+  assert.equal(await run(rotation, { hooks: crashRotation }), 1);
+  assert.equal(commentPosts(rotation).length, 1);
+  resetCalls(rotation);
+  assert.equal(await run(rotation), 0);
+  assert.equal(commentPosts(rotation).length, 0);
+  assert.equal(commentBodies(rotation, "frostyard/problem-intake", 1).length, 1);
 });

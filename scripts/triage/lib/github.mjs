@@ -38,6 +38,18 @@ function parseOutput(text, code) {
   }
 }
 
+// The parsed stdout of a failed call, or null. `gh` exits non-zero when a
+// GraphQL answer holds errors, and prints the answer on stdout.
+function failedStdout(error) {
+  const text = String(error?.stdout ?? "").trim();
+  if (text === "") return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 // Returns the GitHub client of 1 run: api(), graphql(), searchIssues(), used(),
 // remaining(), overSoft() and raiseBudget(). Each `gh` spawn is 1 call.
 //
@@ -64,6 +76,11 @@ export function createGitHub({ env = process.env, limit = 150, softLimit = limit
       const match = /HTTP ([0-9]{3})/.exec(stderr);
       if (match !== null) throw new GitHubError("http", Number(match[1]));
       if (error?.code === "ENOENT") throw new GitHubError("no_gh");
+      // A GraphQL answer with errors: keep the answer, the caller decides.
+      const answer = failedStdout(error);
+      if (answer !== null && typeof answer === "object" && !Array.isArray(answer) && Object.hasOwn(answer, "data")) {
+        return JSON.stringify(answer);
+      }
       throw new GitHubError("gh_failed");
     }
   }
@@ -97,7 +114,8 @@ export function createGitHub({ env = process.env, limit = 150, softLimit = limit
   }
 
   // The one search command of the spec: the job issues of the organization.
-  function searchIssues(query) {
+  // `limit` is 100 for a key lookup and 1000 for the rebuild of published.json.
+  function searchIssues(query, { limit: max = 100 } = {}) {
     const answer = parseOutput(
       spawnCall(
         [
@@ -113,7 +131,7 @@ export function createGitHub({ env = process.env, limit = 150, softLimit = limit
           "--json",
           "repository,number,title,body,state",
           "--limit",
-          "100",
+          String(max),
         ],
         undefined,
       ),

@@ -60,6 +60,17 @@ function ghState(world) {
   return JSON.parse(readFileSync(world.ghStatePath, "utf8"));
 }
 
+// The time of a comment the fake `gh` writes.
+function setNow(world, iso) {
+  const state = ghState(world);
+  state.now = iso;
+  writeFileSync(world.ghStatePath, `${JSON.stringify(state, null, 2)}\n`);
+}
+
+function setHeartbeat(world, day) {
+  writeFileSync(join(world.stateDir, "heartbeat"), `${day}\n`);
+}
+
 function comments(world) {
   return ghState(world).repos["frostyard/problem-intake"]?.issues?.[0]?.comments ?? [];
 }
@@ -109,4 +120,32 @@ test("without a health issue the watchdog comments nowhere and exits 0", async (
   const world = makeWorld({ healthIssue: false, heartbeat: null });
   assert.equal(await run(world), 0);
   assert.equal(ghState(world).repos["frostyard/problem-intake"], undefined);
+});
+
+test("each outage gets 1 warning, and no warning is repeated", async () => {
+  const world = makeWorld({ heartbeat: "2026-11-18" });
+
+  // Outage 1: the last completed run was 3 days ago.
+  assert.equal(await run(world, "2026-11-21T12:00:00Z"), 0);
+  assert.equal(comments(world).length, 1);
+  assert.equal(comments(world)[0].body, WATCHDOG_TEXT);
+
+  // A second watchdog run in the same outage writes no second warning.
+  setNow(world, "2026-11-21T18:00:00Z");
+  assert.equal(await run(world, "2026-11-21T12:00:00Z"), 0);
+  assert.equal(comments(world).length, 1);
+
+  // The job runs again: a new heartbeat.
+  setHeartbeat(world, "2026-11-22");
+  setNow(world, "2026-11-26T12:00:00Z");
+
+  // Outage 2 is a new outage, 4 days after that run.
+  assert.equal(await run(world, "2026-11-26T12:00:00Z"), 0);
+  assert.equal(comments(world).length, 2);
+  assert.equal(comments(world)[1].body, WATCHDOG_TEXT);
+
+  // And it is not repeated either.
+  setNow(world, "2026-11-26T18:00:00Z");
+  assert.equal(await run(world, "2026-11-26T12:00:00Z"), 0);
+  assert.equal(comments(world).length, 2);
 });

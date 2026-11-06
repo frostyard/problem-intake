@@ -17,7 +17,15 @@ export const LABEL = "problem-report";
 export const RUNS_KEPT = 7;
 
 // The reasons work waits for the next run.
-export const DEFERRED_REASONS = Object.freeze(["new_issues", "comments", "budget", "deadline", "no_label", "recovery"]);
+export const DEFERRED_REASONS = Object.freeze([
+  "new_issues",
+  "comments",
+  "budget",
+  "deadline",
+  "no_label",
+  "recovery",
+  "guard",
+]);
 
 export const WATCHDOG_TEXT = "The triage job has not completed a run in the last 2 days.";
 export const ROTATION_TEXT = "The GlitchTip read token is due for rotation.";
@@ -123,12 +131,26 @@ export async function createComment(github, repo, number, body) {
   return github.api(`repos/${repo}/issues/${number}/comments`, { method: "POST", body: { body } });
 }
 
-// The newest comment of the machine account on an issue, or null.
-export function newestMachineComment(comments) {
-  let newest = null;
-  for (const comment of comments ?? []) {
-    if (comment?.author?.login !== "frostyard-machines") continue;
-    if (newest === null || String(comment.createdAt ?? "") > String(newest.createdAt ?? "")) newest = comment;
-  }
-  return newest;
+// The machine account of the job.
+export const MACHINE = "frostyard-machines";
+
+// The comments of an issue from `since` on (an ISO instant). GitHub returns
+// the newest pages first without `since`, so the job always asks with it.
+export async function commentsSince(github, number, since) {
+  const list = await github.api(`repos/${HEALTH_REPO}/issues/${number}/comments?since=${since}&per_page=100`);
+  return Array.isArray(list) ? list.filter((comment) => comment !== null && typeof comment === "object") : [];
+}
+
+// True when the machine account wrote a comment with exactly this text.
+export function hasMachineComment(comments, text) {
+  return (comments ?? []).some(
+    (comment) => comment?.author?.login === MACHINE && String(comment.body ?? "").trim() === text,
+  );
+}
+
+// The day `n` whole days after `day` (YYYY-MM-DD), or before it when n < 0.
+export function dayShift(day, n) {
+  const time = Date.parse(`${day}T00:00:00Z`);
+  if (Number.isNaN(time)) return day;
+  return new Date(time + n * 86_400_000).toISOString().slice(0, 10);
 }

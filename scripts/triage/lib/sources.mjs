@@ -5,7 +5,8 @@
 //
 // A test gives TRIAGE_SOURCES, a fixture folder: `registry/<image>.json` holds
 // { tags, labels } and `index/<feature>/SHA256SUMS` the real index format. No
-// request leaves the machine then.
+// request leaves the machine then. Tests of the production path inject `fetch`
+// and answer from memory.
 //
 // node: builtins only: the team VM runs the job with no `npm`.
 import { readFileSync } from "node:fs";
@@ -30,22 +31,12 @@ const IMAGE = /^[a-z][a-z0-9-]*$/;
 const IMAGE_VERSION = /^[0-9]{14}$/;
 const SOURCE_BLOB = /\/blob\/([0-9a-f]{40})\//;
 
-async function request(url, { accept, token } = {}) {
-  const headers = {};
-  if (accept !== undefined) headers.accept = accept;
-  if (token !== undefined) headers.authorization = `Bearer ${token}`;
-  let answer;
+async function jsonOf(answer, code = "json") {
   try {
-    answer = await fetch(url, {
-      headers,
-      redirect: "follow",
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
+    return await answer.json();
   } catch {
-    throw new SourceError("unreachable");
+    throw new SourceError(code);
   }
-  if (!answer.ok) throw new SourceError("status");
-  return answer;
 }
 
 // The `name; rel="next"` link of a registry answer, or null.
@@ -58,8 +49,9 @@ function nextLink(answer) {
 
 // Returns the source reader of 1 run: listTags(image), imageLabels(image, tag)
 // -> { sourceSha, created }, and featureVersions(feature) -> [version]. Each
-// answer is cached in memory for the run.
-export function createSources({ config } = {}) {
+// answer is cached in memory for the run. `fetch` is globalThis.fetch in
+// production and a stub in the tests.
+export function createSources({ config, fetch: fetchImpl = globalThis.fetch } = {}) {
   const cache = new Map();
   const fixture = config?.sources ?? null;
   const registryUrl = config?.registryUrl ?? "https://ghcr.io/";
@@ -68,7 +60,7 @@ export function createSources({ config } = {}) {
   function cached(key, read) {
     if (!cache.has(key)) {
       const value = Promise.resolve().then(read);
-      // A failed read is not cached: the next key may read it again.
+      // A failed read is not cached: a later key may read it again.
       cache.set(key, value);
       value.catch(() => cache.delete(key));
     }
@@ -83,6 +75,28 @@ export function createSources({ config } = {}) {
     }
   }
 
+  async function request(url, { accept, token } = {}) {
+    const headers = {};
+    if (accept !== undefined) headers.accept = accept;
+    if (token !== undefined) headers.authorization = `Bearer ${token}`;
+    let answer;
+    try {
+      answer = await fetchImpl(url, { headers, redirect: "follow", signal: AbortSignal.timeout(TIMEOUT_MS) });
+    } catch {
+      throw new SourceError("unreachable");
+    }
+    return answer;
+  }
+
+  // The pull token of 1 image: 1 anonymous read of the token endpoint.
+  async function pullToken(image) {
+    const answer = await request(`${registryUrl}token?scope=repository:frostyard/${image}:pull`);
+    if (!answer.ok) throw new SourceError("status");
+    const doc = await jsonOf(answer);
+    if (typeof doc?.token !== "string" || doc.token === "") throw new SourceError("shape");
+    return doc.token;
+  }
+
   async function listTags(image) {
     if (!IMAGE.test(String(image))) throw new SourceError("image");
     if (fixture !== null) {
@@ -91,39 +105,25 @@ export function createSources({ config } = {}) {
       return doc.tags.filter((tag) => typeof tag === "string");
     }
     return cached(`tags:${image}`, async () => {
-      const token = await registryToken(image);
+      const token = await pullToken(image);
       const tags = [];
       let url = `${registryUrl}v2/frostyard/${image}/tags/list`;
       while (url !== null) {
-        const answer = await request(url, { accept: ACCEPT });
-        let doc;
-        try {
-          doc = await answer.json();
-        } catch {
-          throw new SourceError("json");
-        }
+        // The bearer token goes with the list request and with every page.
+        const answer = await request(url, { accept: ACCEPT, token });
+        if (!answer.ok) throw new SourceError("status");
+        const doc = await jsonOf(answer);
         if (!Array.isArray(doc?.tags)) throw new SourceError("shape");
         tags.push(...doc.tags.filter((tag) => typeof tag === "string"));
-        url = nextLink(answer);
-        if (url !== null) url = new URL(url, registryUrl).href;
+        const next = nextLink(answer);
+        url = next === null ? null : new URL(next, registryUrl).href;
       }
       return tags;
     });
   }
 
-  async function registryToken(image) {
-    const url = `${registryUrl}token?scope=repository:frostyard/${image}:pull`;
-    const answer = await request(url);
-    try {
-      const doc = await answer.json();
-      if (typeof doc?.token !== "string" || doc.token === "") throw new SourceError("shape");
-      return doc.token;
-    } catch (error) {
-      if (error instanceof SourceError) throw error;
-      throw new SourceError("json");
-    }
-  }
-
+  // The labels blob of 1 image tag: an index gives the linux/amd64 manifest,
+  // and the config blob holds `config.Labels`.
   async function imageLabels(image, tag) {
     if (!IMAGE.test(String(image))) throw new SourceError("image");
     if (typeof tag !== "string" || !IMAGE_VERSION.test(tag)) throw new SourceError("tag");
@@ -134,31 +134,32 @@ export function createSources({ config } = {}) {
       return labelsOf(labels);
     }
     return cached(`labels:${image}:${tag}`, async () => {
-      const token = await registryToken(image);
-      const manifest = await jsonAt(`${registryUrl}v2/frostyard/${image}/manifests/${tag}`, token);
-      let config = manifest;
+      const token = await pullToken(image);
+      const manifestUrl = `${registryUrl}v2/frostyard/${image}/manifests/${tag}`;
+      let manifest = await readManifest(manifestUrl, token);
       if (Array.isArray(manifest?.manifests)) {
-        // A multi-platform index: take the linux/amd64 manifest.
         const entry = manifest.manifests.find(
           (item) => item?.platform?.os === "linux" && item?.platform?.architecture === "amd64",
         );
         if (entry === undefined) throw new SourceError("no_amd64");
-        config = await jsonAt(`${registryUrl}v2/frostyard/${image}/manifests/${entry.digest}`, token);
+        manifest = await readManifest(`${registryUrl}v2/frostyard/${image}/manifests/${entry.digest}`, token);
       }
-      const digest = config?.config?.digest;
+      const digest = manifest?.config?.digest;
       if (typeof digest !== "string") throw new SourceError("shape");
-      return labelsOf(await jsonAt(`${registryUrl}v2/frostyard/${image}/blobs/${digest}`, token));
+      // A blob redirects to a CDN, so the answer is followed here.
+      const blob = await request(`${registryUrl}v2/frostyard/${image}/blobs/${digest}`, { accept: ACCEPT, token });
+      if (!blob.ok) throw new SourceError("status");
+      const doc = await jsonOf(blob);
+      return labelsOf(doc?.config?.Labels);
     });
   }
 
-  async function jsonAt(url, token) {
-    // A ghcr blob redirects to a CDN, so the answer is followed here.
+  async function readManifest(url, token) {
     const answer = await request(url, { accept: ACCEPT, token });
-    try {
-      return await answer.json();
-    } catch {
-      throw new SourceError("json");
-    }
+    if (!answer.ok) throw new SourceError("status");
+    const doc = await jsonOf(answer);
+    if (doc === null || typeof doc !== "object") throw new SourceError("shape");
+    return doc;
   }
 
   async function featureVersions(feature) {
@@ -177,7 +178,7 @@ export function createSources({ config } = {}) {
     return cached(`index:${feature}`, async () => {
       let answer;
       try {
-        answer = await fetch(`${indexUrl}${feature}/SHA256SUMS`, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+        answer = await fetchImpl(`${indexUrl}${feature}/SHA256SUMS`, { signal: AbortSignal.timeout(TIMEOUT_MS) });
       } catch {
         throw new SourceError("unreachable");
       }

@@ -687,7 +687,11 @@ existing `gh` sign-in.
   image labels are read once a run and kept in memory); a deadline of 10
   minutes. The last 6 calls of the 150 are kept for the health issue, so a run
   that reaches the limit still writes it. Work over a limit waits for the next
-  run, in the same order.
+  run, in the same order. The limit of 10 also counts the `filed` marker of a
+  new issue, so a new issue is opened only with a free slot for its marker. A
+  problem or a step whose public text fails the guard (`assertIssueBody()`,
+  `assertPublicText()`) is skipped and counted deferred `guard`; the run goes
+  on.
 - **Mute.** An issue closed as "not planned" or as "duplicate" mutes its key:
   the publisher never comments on it and never reopens it. A duplicate is no
   fix, so it never starts a release step.
@@ -815,13 +819,17 @@ again from the recovery day.
      version that was not in `feature_index` (newer). No order of feature
      versions is assumed.
 
-   The publisher reopens the issue and comments (marker `step=regressed`,
-   `cycle` + 1, `boundary` the fix boundary that the report reached): "Seen
-   again in <version>, at or after the fix release <boundary>." `<version>` has
-   the token form of the boundary (`app:<semver>`, `image:<id>:<14 digits>` or
-   `feature:<name>:<version>`). The entry changes only after that comment: then
-   `boundary`, `released_day` and `feature_index` become `null`. The cycle
-   starts again at step 2. An observation below the boundary is a host that has not updated: no action.
+   The publisher comments first (marker `step=regressed`, `cycle` + 1,
+   `boundary` the fix boundary that the report reached): "Seen again in
+   <version>, at or after the fix release <boundary>." `<version>` has the
+   token form of the boundary (`app:<semver>`, `image:<id>:<14 digits>` or
+   `feature:<name>:<version>`). Then it reopens the issue. The marker is the
+   record: when the highest marker is `regressed` and the issue is still closed
+   by a close older than that marker, the reopen is pending, and the next run
+   reopens the issue with no second comment, also when its facts no longer hold
+   the observation. After the comment `boundary`, `released_day` and
+   `feature_index` become `null`. The cycle starts again at step 2. An
+   observation below the boundary is a host that has not updated: no action.
 
 This version rule is the loop's authority. GlitchTip's own status cannot be:
 our events carry no `release`, so GlitchTip reopens a resolved issue on any

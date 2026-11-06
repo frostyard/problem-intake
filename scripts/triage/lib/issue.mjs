@@ -197,11 +197,13 @@ export function assertIssueBody(issue) {
       const go = fields.runtime === "go";
       if (go && location !== null) fail("location_not_public");
       if (!go && frames.length > 0) fail("frames_not_public");
-      if (go && frames.length === 0) fail("frames_missing");
-      if (!go && location === null) fail("location_missing");
     }
     if (frames.length > 32) fail("frames_too_many");
-    for (const frame of frames) if (!isPublishedFrame(frame, name)) fail("frame_not_published");
+    for (const frame of frames) {
+      // A frame is a public value: it never holds a day.
+      if (typeof frame === "string" && DAY.test(frame)) fail("frame_day");
+      if (!isPublishedFrame(frame, name)) fail("frame_not_published");
+    }
     if (location !== null) checkValue("location", location, VALUE.location);
   }
 
@@ -313,14 +315,18 @@ export function parseIssueBody(body) {
 // The issue-body body of the health issue and the step comments hold no day
 // and no count: this refuses a day, and a digit run that is not inside a
 // version or a fix boundary. With `noDigits`, it refuses any digit at all.
-export function assertPublicText(text, { noDigits = false } = {}) {
+// `fixed` lists the literal counts of the spec's own step texts, which are not
+// values of a report.
+export function assertPublicText(text, { noDigits = false, fixed = [] } = {}) {
   if (typeof text !== "string") fail("text");
   if (DAY.test(text)) fail("text_day");
   if (noDigits) {
     if (/[0-9]/.test(text)) fail("text_digit");
     return text;
   }
-  const stripped = text
+  let stripped = text;
+  for (const phrase of fixed) stripped = stripped.split(phrase).join(" ");
+  stripped = stripped
     .replace(/\bapp:(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})(?:-(?:alpha|beta|rc)\.[0-9]{1,4})?/g, " ")
     .replace(/\bimage:[a-z][a-z0-9-]*:[0-9]{14}\b/g, " ")
     .replace(/\bfeature:[a-z0-9][a-z0-9._-]*:[0-9A-Za-z][0-9A-Za-z.+~_-]*/g, " ")

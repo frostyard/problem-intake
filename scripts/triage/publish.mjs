@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { ConfigError, loadConfig } from "./lib/config.mjs";
 import { assertFacts } from "./lib/facts.mjs";
 import { BudgetError, createGitHub, GitHubError } from "./lib/github.mjs";
-import { assertIssueBody, assertPublicText, parseIssueBody, routeOf } from "./lib/issue.mjs";
+import { assertIssueBody, assertPublicText, IssueError, parseIssueBody, routeOf } from "./lib/issue.mjs";
 import {
   compareSemver,
   countCoveredDay,
@@ -48,6 +48,14 @@ const DEADLINE_MS = 10 * 60 * 1000;
 const COVERED_DAYS = 14;
 const ROTATION_DAY = 335;
 const SEMVER = /^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})(?:-(alpha|beta|rc)\.(0|[1-9][0-9]{0,3}))?$/;
+// A day never goes out: it is checked on every dynamic public value.
+const DAY = /\d{4}-\d{2}-\d{2}/;
+// The fixed count of the spec's own step text, not a value of a report.
+const FIXED_COUNTS = Object.freeze([`${COVERED_DAYS} covered days`]);
+const RELEASES_PAGE = 100;
+const MAX_RELEASE_PAGES = 50;
+const COMMENTS_PAGE = 100;
+const MAX_COMMENT_PAGES = 20;
 const IMAGE_VERSION = /^[0-9]{14}$/;
 
 // A fixed diagnostic line. Never a value of facts, a token or a response body.
@@ -178,6 +186,7 @@ export async function main({ now = new Date(), env = process.env, hooks = {} } =
     actions: 0,
     releases: new Map(),
     compares: new Map(),
+    commits: new Map(),
     info: new Map(),
     fresh: new Set(),
     health: health.readHealth(config.stateDir),
@@ -282,17 +291,21 @@ async function syncHealthIssue(run, body, previous, entry) {
     await health.setIssueBody(run.github, health.HEALTH_REPO, issue.number, body);
     run.hooks.afterAction?.("health-body");
   }
-  if (previous !== null && previous.status === "ok" && entry.status !== "ok") {
-    await health.createComment(
-      run.github,
-      health.HEALTH_REPO,
-      issue.number,
-      `The triage job run status changed from ok to ${entry.status}.`,
-    );
+  const statusText =
+    previous !== null && previous.status === "ok" && entry.status !== "ok"
+      ? `The triage job run status changed from ok to ${entry.status}.`
+      : null;
+  const rotationText = entry.rotation_due === true && previous?.rotation_due !== true ? health.ROTATION_TEXT : null;
+  if (statusText === null && rotationText === null) return;
+
+  // A comment of this day is already 1 of these: a rerun writes no second 1.
+  const today = await health.commentsSince(run.github, issue.number, `${run.today}T00:00:00Z`);
+  if (statusText !== null && !health.hasMachineComment(today, statusText)) {
+    await health.createComment(run.github, health.HEALTH_REPO, issue.number, statusText);
     run.hooks.afterAction?.("health-comment");
   }
-  if (entry.rotation_due === true && previous?.rotation_due !== true) {
-    await health.createComment(run.github, health.HEALTH_REPO, issue.number, health.ROTATION_TEXT);
+  if (rotationText !== null && !health.hasMachineComment(today, rotationText)) {
+    await health.createComment(run.github, health.HEALTH_REPO, issue.number, rotationText);
     run.hooks.afterAction?.("health-rotation");
   }
 }
@@ -301,7 +314,7 @@ async function syncHealthIssue(run, body, previous, entry) {
 // markers of each issue set the cycle, the state and the boundary in sync().
 async function rebuild(run) {
   const doc = emptyPublished();
-  const hits = await run.github.searchIssues('"Problem key:"');
+  const hits = await run.github.searchIssues('"Problem key:"', { limit: 1000 });
   for (const hit of hits ?? []) {
     const repo = hit?.repository?.nameWithOwner;
     if (typeof repo !== "string") continue;
@@ -325,7 +338,7 @@ const ISSUE_FIELDS = [
   "author { login }",
   "body",
   "labels(first: 20) { nodes { name } }",
-  "comments(last: 100) { nodes { author { login } authorAssociation body createdAt } }",
+  "comments(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { author { login } authorAssociation body createdAt } }",
   "timelineItems(itemTypes: [CLOSED_EVENT], last: 1) { nodes { ... on ClosedEvent { createdAt closer { __typename ... on PullRequest { mergeCommit { oid } } ... on Commit { oid } } } } }",
 ].join("\n");
 
@@ -379,18 +392,29 @@ async function syncKey(run, published, key, node) {
     run.info.delete(key);
     return;
   }
-  const comments = (node.comments?.nodes ?? []).filter((comment) => comment !== null && typeof comment === "object");
-  const markers = [];
-  for (const comment of comments) {
-    if (comment.author?.login !== MACHINE) continue;
-    const first = String(comment.body ?? "").split(/\r?\n/)[0];
-    const marker = parseMarker(first);
-    if (marker !== null && marker.key === key) markers.push(marker);
+  let comments = (node.comments?.nodes ?? []).filter((comment) => comment !== null && typeof comment === "object");
+  let pageInfo = node.comments?.pageInfo ?? null;
+  let markers = trustedMarkers(comments, key);
+  // The bot writes its markers in time order, so the newest trusted marker is
+  // the highest. When the last 100 comments hold none, read earlier pages.
+  for (let page = 1; markers.length === 0 && page < MAX_COMMENT_PAGES; page += 1) {
+    if (pageInfo?.hasPreviousPage !== true || typeof pageInfo?.startCursor !== "string") break;
+    if (!gate(run)) {
+      // No action and no state change for this key: the next run reads it.
+      defer(run, run.stopped);
+      return;
+    }
+    const earlier = await earlierComments(run, entry, pageInfo.startCursor);
+    if (earlier === null) break;
+    comments = [...earlier.comments, ...comments];
+    markers = trustedMarkers(comments, key);
+    pageInfo = earlier.pageInfo;
   }
   // The markers are the truth: the highest 1 sets the cycle, the boundary and
   // the marker of the entry. A different step (higher or lower) means lost
   // progress, and lost progress is reset, never guessed.
   const best = highestMarker(markers);
+  const markerAt = best === null ? null : best.createdAt ?? null;
   const recorded = entry.last_comment_marker === null ? null : parseMarker(entry.last_comment_marker);
   const sameStep = best !== null && recorded !== null && best.cycle === recorded.cycle && best.step === recorded.step;
   if (best !== null) {
@@ -418,22 +442,31 @@ async function syncKey(run, published, key, node) {
   run.info.set(key, info);
 
   const step = entry.last_comment_marker === null ? null : parseMarker(entry.last_comment_marker)?.step ?? null;
+  const closedBeforeMarker = info.closedAt !== null && markerAt !== null && Date.parse(info.closedAt) < Date.parse(markerAt);
+  info.pendingReopen = step === "regressed" && info.closed && closedBeforeMarker;
   if (info.closed && (info.stateReason === "NOT_PLANNED" || info.stateReason === "DUPLICATE")) {
     entry.state = "muted";
   } else if (step === "released") {
     entry.state = "released";
   } else if (step === "verified") {
     entry.state = "verified";
+  } else if (info.pendingReopen) {
+    entry.state = "filed";
   } else if (info.closed && (info.stateReason === "COMPLETED" || info.stateReason === null)) {
     entry.state = "merged";
   } else {
     entry.state = "filed";
   }
 
-  // A tracked issue with no filed marker (a crash after the create) gets it.
+  // A tracked issue with no filed marker (a crash after the create) gets it,
+  // when the run has a free slot for it.
   if (entry.last_comment_marker === null && !info.closed) {
+    if (!hasSlot(run, 1)) {
+      defer(run, "comments");
+      return;
+    }
     const marker = formatMarker({ key, cycle: entry.cycle, step: "filed", boundary: null });
-    await postComment(run, published, entry, marker, null);
+    if (!(await speak(run, published, entry, marker, null))) return;
     return;
   }
 
@@ -443,6 +476,40 @@ async function syncKey(run, published, key, node) {
   if ((entry.state === "released" || entry.state === "verified") && entry.released_day === null) {
     await restoreReleased(run, entry);
   }
+}
+
+// The trusted markers of a key among a list of comments, each with the time of
+// its comment.
+function trustedMarkers(comments, key) {
+  const markers = [];
+  for (const comment of comments) {
+    if (comment.author?.login !== MACHINE) continue;
+    const first = String(comment.body ?? "").split(/\r?\n/)[0];
+    const marker = parseMarker(first);
+    if (marker !== null && marker.key === key) markers.push({ ...marker, createdAt: comment.createdAt ?? null });
+  }
+  return markers;
+}
+
+// The 100 comments before `before` on 1 issue: 1 query.
+async function earlierComments(run, entry, before) {
+  const [owner, name] = entry.repo.split("/");
+  const query = [
+    "query($owner: String!, $name: String!, $before: String!) {",
+    "  repository(owner: $owner, name: $name) {",
+    `i${entry.number}: issue(number: ${entry.number}) {`,
+    "comments(last: 100, before: $before) { pageInfo { hasPreviousPage startCursor } nodes { author { login } authorAssociation body createdAt } }",
+    "}",
+    "  }",
+    "}",
+  ].join("\n");
+  const data = await run.github.graphql(query, { owner, name, before });
+  const node = data?.repository?.[`i${entry.number}`] ?? null;
+  if (node === null) return null;
+  return {
+    comments: (node.comments?.nodes ?? []).filter((comment) => comment !== null && typeof comment === "object"),
+    pageInfo: node.comments?.pageInfo ?? null,
+  };
 }
 
 // An issue that did not come back from the GraphQL query may have moved: 1
@@ -513,8 +580,14 @@ async function restoreReleased(run, entry) {
 
 async function releasesOf(run, repo) {
   if (run.releases.has(repo)) return run.releases.get(repo);
-  const answer = await run.github.api(`repos/${repo}/releases?per_page=100`);
-  const list = (Array.isArray(answer) ? answer : []).filter(
+  const all = [];
+  for (let page = 1; page <= MAX_RELEASE_PAGES; page += 1) {
+    const answer = await run.github.api(`repos/${repo}/releases?per_page=${RELEASES_PAGE}&page=${page}`);
+    const pageList = Array.isArray(answer) ? answer : [];
+    all.push(...pageList);
+    if (pageList.length < RELEASES_PAGE) break;
+  }
+  const list = all.filter(
     (item) =>
       item !== null &&
       typeof item === "object" &&
@@ -546,11 +619,31 @@ function containsFix(status) {
   return status === "ahead" || status === "identical";
 }
 
+// The date of the fix commit, read once and cached. null when it cannot be
+// read: the close time is the filter then.
+async function closerDateOf(run, repo, sha) {
+  if (sha === null) return null;
+  const id = `${repo}:${sha}`;
+  if (run.commits.has(id)) return run.commits.get(id);
+  let date = null;
+  try {
+    const answer = await run.github.api(`repos/${repo}/commits/${sha}`);
+    if (typeof answer?.commit?.committer?.date === "string") date = answer.commit.committer.date;
+  } catch (error) {
+    if (error instanceof GitHubError && error.status === 404) date = null;
+    else throw error;
+  }
+  run.commits.set(id, date);
+  return date;
+}
+
 // The fix boundary of an app problem: the oldest release of the repository
-// whose tag contains the fix commit.
+// whose tag contains the fix commit. With a closer, only a release published
+// at or after the fix commit can hold it.
 async function appBoundary(run, entry, info) {
   const releases = await releasesOf(run, entry.repo);
-  const closeAt = info.closedAt ?? null;
+  const closerDate = await closerDateOf(run, entry.repo, info.closerSha);
+  const closeAt = closerDate ?? info.closedAt ?? null;
   const candidates = releases
     .filter((item) => closeAt === null || Date.parse(item.published_at) >= Date.parse(closeAt))
     .slice()
@@ -570,7 +663,9 @@ async function appBoundary(run, entry, info) {
 // contains the fix commit. Every image must have 1, else the key waits.
 async function imageBoundary(run, info, images) {
   if (images.length === 0) return null;
-  const stamp = utcStamp(info.closedAt);
+  // With a closer, the tags are filtered by the date of the fix commit.
+  const closerDate = await closerDateOf(run, IMAGE_REPO, info.closerSha);
+  const stamp = utcStamp(closerDate ?? info.closedAt);
   const found = [];
   for (const image of images) {
     const tags = await run.sources.listTags(image.id);
@@ -629,17 +724,41 @@ async function fixedInBoundary(run, info) {
 // The public comment of a step: the marker line first, then the text. The
 // state is written after the hook, so a crash there repeats no action.
 async function postComment(run, published, entry, marker, text) {
+  // Every dynamic public value of the text is checked before it is sent.
+  if (text !== null) assertPublicText(text, { fixed: FIXED_COUNTS });
   const body = text === null ? marker : `${marker}\n\n${text}`;
   await run.github.api(`repos/${entry.repo}/issues/${entry.number}/comments`, { method: "POST", body: { body } });
   entry.last_comment_marker = marker;
+  run.actions += 1;
   run.hooks.afterAction?.("comment");
   writePublished(run.dir, published);
 }
 
+// Posts 1 step comment. A guard error is the fault of this key only: it is
+// counted deferred and the run goes on.
+async function speak(run, published, entry, marker, text) {
+  try {
+    await postComment(run, published, entry, marker, text);
+    return true;
+  } catch (error) {
+    if (error instanceof IssueError) {
+      defer(run, "guard");
+      return false;
+    }
+    throw error;
+  }
+}
+
 async function reopen(run, published, entry) {
   await run.github.api(`repos/${entry.repo}/issues/${entry.number}`, { method: "PATCH", body: { state: "open" } });
+  run.actions += 1;
   run.hooks.afterAction?.("reopen");
   writePublished(run.dir, published);
+}
+
+// A slot of the run for 1 comment or reopen (point 6: filed markers count too).
+function hasSlot(run, count = 1) {
+  return run.actions + count <= MAX_ACTIONS;
 }
 
 async function loop(run, published, facts) {
@@ -649,11 +768,16 @@ async function loop(run, published, facts) {
     const entry = published.keys[key];
     const info = run.info.get(key);
     if (info === undefined) continue;
-    if (entry.state === "muted" || entry.state === "filed") continue;
+    if (entry.state === "muted") continue;
     if (!gate(run)) {
       defer(run, run.stopped);
       continue;
     }
+    if (info.pendingReopen === true) {
+      await stepReopen(run, published, entry, info);
+      continue;
+    }
+    if (entry.state === "filed") continue;
     if (entry.state === "merged") await stepMerged(run, published, key, entry, info);
     else await stepWatching(run, published, key, entry, info, problems.get(key) ?? null, facts);
   }
@@ -678,7 +802,7 @@ async function stepMerged(run, published, key, entry, info) {
     throw error;
   }
   if (found === null) return;
-  if (run.actions + 1 > MAX_ACTIONS) {
+  if (!hasSlot(run, 1)) {
     defer(run, "comments");
     return;
   }
@@ -688,9 +812,8 @@ async function stepMerged(run, published, key, entry, info) {
   }
   const boundary = formatBoundary(found.boundary);
   const marker = formatMarker({ key, cycle: entry.cycle, step: "released", boundary });
-  const text = `Fix released in ${boundary}. The job now watches reports for 14 covered days.`;
-  await postComment(run, published, entry, marker, text);
-  run.actions += 1;
+  const text = `Fix released in ${boundary}. The job now watches reports for ${COVERED_DAYS} covered days.`;
+  if (!(await speak(run, published, entry, marker, text))) return;
   entry.state = "released";
   entry.boundary = boundary;
   entry.released_day = found.releasedDay;
@@ -716,7 +839,7 @@ async function stepWatching(run, published, key, entry, info, problem, facts) {
     writePublished(run.dir, published);
   }
   if (entry.covered_days < COVERED_DAYS) return;
-  if (run.actions + 1 > MAX_ACTIONS) {
+  if (!hasSlot(run, 1)) {
     defer(run, "comments");
     return;
   }
@@ -726,14 +849,13 @@ async function stepWatching(run, published, key, entry, info, problem, facts) {
   }
   const marker = formatMarker({ key, cycle: entry.cycle, step: "verified", boundary: entry.boundary });
   const text = `No qualifying reports observed in ${COVERED_DAYS} covered days after ${entry.boundary}.`;
-  await postComment(run, published, entry, marker, text);
-  run.actions += 1;
+  if (!(await speak(run, published, entry, marker, text))) return;
   entry.state = "verified";
   writePublished(run.dir, published);
 }
 
 async function stepRegressed(run, published, key, entry, info, boundary, observation) {
-  if (run.actions + REGRESSION_SLOTS > MAX_ACTIONS) {
+  if (!hasSlot(run, REGRESSION_SLOTS)) {
     defer(run, "comments");
     return;
   }
@@ -741,18 +863,13 @@ async function stepRegressed(run, published, key, entry, info, boundary, observa
     defer(run, run.stopped);
     return;
   }
-  // The entry changes only after the regressed comment landed, so a failed
-  // comment repeats the comment, not a second cycle.
+  // The comment comes first and the reopen after it, so a failed reopen leaves
+  // a marker the next run acts on (1 pending reopen), not a lost regression.
   const cycle = entry.cycle + 1;
-  if (info.closed) {
-    await reopen(run, published, entry);
-    run.actions += 1;
-  }
   const token = versionToken(boundary, observation);
   const marker = formatMarker({ key, cycle, step: "regressed", boundary: entry.boundary });
   const text = `Seen again in ${token}, at or after the fix release ${entry.boundary}.`;
-  await postComment(run, published, entry, marker, text);
-  run.actions += 1;
+  if (!(await speak(run, published, entry, marker, text))) return;
   entry.cycle = cycle;
   entry.state = "filed";
   entry.boundary = null;
@@ -761,6 +878,28 @@ async function stepRegressed(run, published, key, entry, info, boundary, observa
   entry.covered_days = 0;
   entry.last_counted_day = null;
   writePublished(run.dir, published);
+  if (info.closed) {
+    if (!gate(run)) {
+      defer(run, run.stopped);
+      return;
+    }
+    info.pendingReopen = false;
+    await reopen(run, published, entry);
+  }
+}
+
+// The reopen of a regression whose comment landed but whose reopen did not.
+async function stepReopen(run, published, entry, info) {
+  if (!hasSlot(run, 1)) {
+    defer(run, "comments");
+    return;
+  }
+  if (!gate(run)) {
+    defer(run, run.stopped);
+    return;
+  }
+  info.pendingReopen = false;
+  await reopen(run, published, entry);
 }
 
 // The GlitchTip issue ids of each tracked key: from health.json issue_keys and
@@ -842,21 +981,37 @@ async function fileNew(run, published, facts) {
       defer(run, "no_label");
       continue;
     }
+    // The filed marker of a new issue is 1 of the comments of the run.
+    if (!hasSlot(run, 1)) {
+      defer(run, "new_issues");
+      continue;
+    }
     if (!gate(run)) {
       defer(run, run.stopped);
       continue;
     }
-    const built = assertIssueBody({
-      kind: problem.kind,
-      class: problem.class,
-      fields: problem.fields,
-      frames: problem.frames,
-      location: problem.location,
-      version: problem.kind === "app_problem" ? appVersionOf(problem) : null,
-      images: problem.kind === "app_problem" ? [] : imagesOf(problem),
-      key: problem.key,
-      glitchtipIds: problem.glitchtip_issue_ids,
-    });
+    // The guard of this problem only: a value that cannot go out defers the
+    // problem and the run goes on.
+    let built;
+    try {
+      built = assertIssueBody({
+        kind: problem.kind,
+        class: problem.class,
+        fields: problem.fields,
+        frames: problem.frames,
+        location: problem.location,
+        version: problem.kind === "app_problem" ? appVersionOf(problem) : null,
+        images: problem.kind === "app_problem" ? [] : imagesOf(problem),
+        key: problem.key,
+        glitchtipIds: problem.glitchtip_issue_ids,
+      });
+    } catch (error) {
+      if (error instanceof IssueError) {
+        defer(run, "guard");
+        continue;
+      }
+      throw error;
+    }
     const created = await run.github.api(`repos/${problem.repo}/issues`, {
       method: "POST",
       body: { title: built.title, body: built.body, labels: [LABEL] },
@@ -869,7 +1024,7 @@ async function fileNew(run, published, facts) {
     filed += 1;
     perRepo.set(problem.repo, (perRepo.get(problem.repo) ?? 0) + 1);
     const marker = formatMarker({ key: problem.key, cycle: 1, step: "filed", boundary: null });
-    await postComment(run, published, entry, marker, null);
+    if (!(await speak(run, published, entry, marker, null))) continue;
   }
   writePublished(run.dir, published);
 }

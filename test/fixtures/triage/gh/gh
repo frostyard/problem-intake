@@ -69,6 +69,24 @@ function findIssue(repo, number) {
   return (repo.issues ?? []).find((issue) => issue.number === number) ?? null;
 }
 
+// The comments of 1 issue: the last 100 (or the 100 before `before`). The
+// cursor is the index of the first comment of the page.
+function commentPage(issue, before = null, limit = 100) {
+  const all = issue.comments ?? [];
+  let end = all.length;
+  if (before !== null && before !== undefined) end = Math.max(0, Math.min(all.length, Number(before)));
+  const start = Math.max(0, end - limit);
+  return {
+    pageInfo: { hasPreviousPage: start > 0, startCursor: String(start) },
+    nodes: all.slice(start, end).map((comment) => ({
+      author: { login: comment.author ?? "frostyard-machines" },
+      authorAssociation: comment.association ?? "MEMBER",
+      body: comment.body ?? "",
+      createdAt: comment.createdAt ?? NOW,
+    })),
+  };
+}
+
 function graphqlIssue(issue, id) {
   return {
     number: issue.number,
@@ -79,14 +97,7 @@ function graphqlIssue(issue, id) {
     author: { login: issue.author ?? "frostyard-machines" },
     body: issue.body ?? "",
     labels: { nodes: (issue.labels ?? []).map((name) => ({ name })) },
-    comments: {
-      nodes: (issue.comments ?? []).map((comment) => ({
-        author: { login: comment.author ?? "frostyard-machines" },
-        authorAssociation: comment.association ?? "MEMBER",
-        body: comment.body ?? "",
-        createdAt: comment.createdAt ?? NOW,
-      })),
-    },
+    comments: commentPage(issue),
     timelineItems: {
       nodes:
         issue.closedAt === undefined || issue.closedAt === null
@@ -141,8 +152,11 @@ function searchIssues() {
       });
     }
   }
+  // `--limit n` caps the answer, as GitHub does.
+  const at = argv.indexOf("--limit");
+  const limit = at >= 0 ? Number(argv[at + 1]) : 30;
   save(state);
-  answer(hits);
+  answer(hits.slice(0, Number.isSafeInteger(limit) && limit > 0 ? limit : 30));
 }
 
 if (argv[0] === "search" && argv[1] === "issues") searchIssues();
@@ -181,10 +195,12 @@ if (path === "graphql") {
   const repo = (state.repos ?? {})[id] ?? { issues: [] };
   const repository = {};
   const errors = [];
+  const earlier = String(variables.query).includes("before: $before");
   for (const match of String(variables.query).matchAll(/i([0-9]+): issue\(number: ([0-9]+)\)/g)) {
     const number = Number(match[2]);
     const issue = findIssue(repo, number);
-    repository[`i${number}`] = issue === null ? null : graphqlIssue(issue, id);
+    repository[`i${number}`] =
+      issue === null ? null : earlier ? { comments: commentPage(issue, variables.before ?? null) } : graphqlIssue(issue, id);
     // A deleted or transferred issue: a null alias and a NOT_FOUND error, as
     // GitHub answers it.
     if (issue === null) {
@@ -198,7 +214,11 @@ if (path === "graphql") {
   // `graphqlErrors` adds 1 error of another type, for the refusal test.
   if (Array.isArray(state.graphqlErrors)) errors.push(...state.graphqlErrors);
   save(state);
-  answer(errors.length === 0 ? { data: { repository } } : { data: { repository }, errors });
+  if (errors.length === 0) answer({ data: { repository } });
+  // `gh` prints the JSON on stdout and exits 1 when the answer holds errors.
+  process.stdout.write(JSON.stringify({ data: { repository }, errors }));
+  process.stderr.write("gh: Could not resolve to an Issue\n");
+  process.exit(1);
 }
 
 const [pathname, search] = path.split("?");
@@ -257,8 +277,18 @@ if (rest[0] === "labels" && rest.length === 2) {
 }
 
 if (rest[0] === "releases" && rest.length === 1) {
+  const all = (state.repos ?? {})[id]?.releases ?? [];
+  const perPage = Number(params.get("per_page") ?? "30");
+  const page = Number(params.get("page") ?? "1");
   save(state);
-  answer((state.repos ?? {})[id]?.releases ?? []);
+  answer(all.slice((page - 1) * perPage, page * perPage));
+}
+
+if (rest[0] === "commits" && rest.length === 2) {
+  const commits = (state.repos ?? {})[id]?.commits ?? {};
+  if (!Object.hasOwn(commits, rest[1])) fail(404, "Not Found");
+  save(state);
+  answer({ sha: rest[1], commit: { committer: { date: commits[rest[1]] } } });
 }
 
 if (rest[0] === "compare" && rest.length === 2) {
@@ -274,6 +304,12 @@ if (rest[0] === "issues" && rest.length >= 2) {
   if (issue === null) fail(404, "Not Found");
   if (rest.length === 2) {
     if (method === "PATCH") {
+      // `failReopen: n` fails the next n PATCHes with HTTP 500.
+      if ((state.failReopen ?? 0) > 0) {
+        state.failReopen -= 1;
+        save(state);
+        fail(500, "Server Error");
+      }
       if (input?.state !== undefined) issue.state = input.state;
       if (input?.body !== undefined) issue.body = input.body;
       save(state);
@@ -301,14 +337,18 @@ if (rest[0] === "issues" && rest.length >= 2) {
       save(state);
       answer({ id: issue.comments.length, body: comment.body });
     }
+    // `since` keeps the comments of that instant on, as GitHub does.
+    const since = params.get("since");
     save(state);
     answer(
-      issue.comments.map((comment) => ({
-        author: { login: comment.author ?? "frostyard-machines" },
-        authorAssociation: comment.association ?? "MEMBER",
-        body: comment.body ?? "",
-        createdAt: comment.createdAt ?? NOW,
-      })),
+      issue.comments
+        .filter((comment) => since === null || Date.parse(comment.createdAt ?? NOW) >= Date.parse(since))
+        .map((comment) => ({
+          author: { login: comment.author ?? "frostyard-machines" },
+          authorAssociation: comment.association ?? "MEMBER",
+          body: comment.body ?? "",
+          createdAt: comment.createdAt ?? NOW,
+        })),
     );
   }
 }

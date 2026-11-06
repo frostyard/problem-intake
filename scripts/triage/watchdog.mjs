@@ -47,10 +47,13 @@ export async function main({ now = new Date(), env = process.env } = {}) {
       diagnostic("health_issue_missing");
       return 0;
     }
-    const comments = await github.api(`repos/${health.HEALTH_REPO}/issues/${issue.number}/comments?per_page=100`);
-    const newest = health.newestMachineComment(comments);
-    // 1 comment for each outage: the same text a second time says nothing new.
-    if (newest !== null && String(newest.body ?? "").trim() === health.WATCHDOG_TEXT) return 0;
+    // 1 comment for each outage. GitHub returns the newest pages first without
+    // `since`, so the read starts at the day after the last completed run (or 3
+    // days back with no heartbeat), and an existing warning of that window is
+    // not repeated.
+    const since = heartbeat === null ? health.dayShift(today, -3) : health.dayShift(heartbeat, 1);
+    const comments = await health.commentsSince(github, issue.number, `${since}T00:00:00Z`);
+    if (health.hasMachineComment(comments, health.WATCHDOG_TEXT)) return 0;
     await health.createComment(github, health.HEALTH_REPO, issue.number, health.WATCHDOG_TEXT);
     return 0;
   } catch (error) {
