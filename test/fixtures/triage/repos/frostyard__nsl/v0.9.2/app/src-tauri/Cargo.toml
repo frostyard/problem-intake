@@ -1,0 +1,8 @@
+[package]
+name = "nsl-gui"
+version = "0.9.2"
+edition = "2021"
+
+[[bin]]
+name = "nsl-gui"
+path = "src/main.rs"
