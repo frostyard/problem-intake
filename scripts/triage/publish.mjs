@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 
 import { ConfigError, loadConfig } from "./lib/config.mjs";
 import { assertFacts } from "./lib/facts.mjs";
-import { BudgetError, createGitHub, GitHubError } from "./lib/github.mjs";
+import { BudgetError, createGitHub, DeadlineError, GitHubError } from "./lib/github.mjs";
 import { assertIssueBody, assertPublicText, IssueError, parseIssueBody, routeOf } from "./lib/issue.mjs";
 import {
   compareSemver,
@@ -33,7 +33,7 @@ import {
 import { emptyPublished, newEntry, readPublished, trackedKeys, writePublished } from "./lib/published.mjs";
 import { ensureStateDir, StateError, utcDay } from "./lib/state.mjs";
 import * as health from "./lib/health.mjs";
-import { createDelivery, dayOf, DeliveryError } from "./lib/delivery.mjs";
+import { createDelivery, dayOf, DeliveryError, DeliveryStop } from "./lib/delivery.mjs";
 
 const MACHINE = "frostyard-machines";
 const LABEL = "problem-report";
@@ -52,6 +52,7 @@ const SEMVER = /^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})(?
 const DAY = /\d{4}-\d{2}-\d{2}/;
 // The fixed count of the spec's own step text, not a value of a report.
 const FIXED_COUNTS = Object.freeze([`${COVERED_DAYS} covered days`]);
+const REPO_URL = /^https:\/\/api\.github\.com\/repos\/(frostyard\/[A-Za-z0-9._-]+)$/;
 const REBUILD_QUERY = '"Problem key:" org:frostyard author:frostyard-machines label:problem-report is:issue';
 const RELEASES_PAGE = 100;
 const MAX_RELEASE_PAGES = 50;
@@ -206,7 +207,7 @@ export async function main({ now = new Date(), env = process.env, hooks = {} } =
       clock,
       deadlineAt,
     }),
-    sources: createDelivery({ config }),
+    sources: createDelivery({ config, clock, deadline: deadlineAt, fetch: hooks.fetch ?? globalThis.fetch }),
     deferred: {},
     stopped: null,
     actions: 0,
@@ -236,11 +237,17 @@ async function publish(run) {
     if (!(error instanceof StateError)) throw error;
   }
   if (published === null) {
-    published = await rebuild(run);
+    try {
+      published = await rebuild(run);
+    } catch (error) {
+      // The rebuild's work phase stopped: no state, the health issue only.
+      if (!(error instanceof BudgetError || error instanceof DeadlineError)) throw error;
+      run.stopped = run.stopped ?? (error instanceof DeadlineError ? "deadline" : "budget");
+    }
     if (published === null) {
       // An incomplete rebuild cannot say which keys are tracked: no loop work,
       // no issue, and no published.json write this run.
-      defer(run, "recovery");
+      defer(run, run.stopped ?? "recovery");
       return await endRun(run, facts);
     }
   }
@@ -260,27 +267,59 @@ async function publish(run) {
 
 // The end of every run that did not end in an unexpected error: the health
 // issue, the run entry of health.json and the heartbeat.
+// The health phase of every run that did not end in an unexpected error: the
+// durable notifications, the health issue, and the run entry with every
+// deferral of this run. `facts` is { run: { status, notes, token_age_days },
+// held } — the facts document, or the fixed status of a stale run.
 async function endRun(run, facts) {
   run.github.raiseBudget();
   const previous = run.health.runs.at(-1) ?? null;
+  const status = facts.run.status;
   const rotationDue =
     facts.run.token_age_days === null ? previous?.rotation_due === true : facts.run.token_age_days >= ROTATION_DAY;
+
+  // 1. Each transition of this run becomes a pending notification, and it is
+  //    written before any comment: a crash repeats no comment, and a retry
+  //    finds the pending entry again.
+  const wanted = [];
+  if (previous !== null && previous.status === "ok" && status !== "ok") {
+    wanted.push(`The triage job run status changed from ok to ${status}.`);
+  }
+  if (rotationDue && previous?.rotation_due !== true) wanted.push(health.ROTATION_TEXT);
+  let added = false;
+  for (const text of wanted) {
+    if (run.health.notifications.some((entry) => entry.text === text)) continue;
+    run.health.notifications.push({ id: health.newNotificationId(), text, since: run.today });
+    added = true;
+  }
+  if (added) health.writeHealth(run.dir, run.health);
+
+  // 2. The health issue, so the pending notifications have a place.
+  let issue = await health.findHealthIssue(run.github);
+  if (issue === null) {
+    const first = health.healthBody({ status, notes: facts.run.notes, rotationDue, deferred: run.deferred });
+    issue = await health.createHealthIssue(run.github, first);
+    run.hooks.afterAction?.("health-create");
+  }
+
+  // 3. Deliver each pending notification once.
+  await deliverNotifications(run, issue);
+
+  // 4. The run entry and the body, with the deferrals of the whole run.
   const entry = health.runEntry({
     day: run.today,
-    status: facts.run.status,
+    status,
     notes: facts.run.notes,
     held: facts.held,
     deferred: run.deferred,
     rotationDue,
   });
-  const body = health.healthBody({
-    status: facts.run.status,
-    notes: facts.run.notes,
-    rotationDue,
-    deferred: entry.deferred,
-  });
+  const body = health.healthBody({ status, notes: facts.run.notes, rotationDue, deferred: entry.deferred });
   assertPublicText(body, { noDigits: true });
-  await syncHealthIssue(run, body, previous, entry);
+  if (issue.body !== body) {
+    await health.setIssueBody(run.github, health.HEALTH_REPO, issue.number, body);
+    run.hooks.afterAction?.("health-body");
+  }
 
   run.health.runs.push(entry);
   health.writeHealth(run.dir, run.health);
@@ -288,84 +327,77 @@ async function endRun(run, facts) {
   return 0;
 }
 
-// Stale or invalid facts: the health issue only, no loop step, no covered day.
+// Each pending notification is 1 comment whose first line is its id. An entry
+// leaves health.json only after its comment is on the issue, so a crash
+// between the 2 writes repeats no comment.
+async function deliverNotifications(run, issue) {
+  for (const notification of [...run.health.notifications]) {
+    if (!gate(run)) {
+      defer(run, run.stopped ?? "deadline");
+      return;
+    }
+    const marker = health.notificationMarker(notification.id);
+    const comments = await health.commentsSince(run.github, issue.number, `${notification.since}T00:00:00Z`, {
+      gate: () => gate(run),
+      pages: Number.isSafeInteger(run.hooks.commentPages) ? run.hooks.commentPages : health.COMMENT_PAGES,
+    });
+    if (comments === null) {
+      // An incomplete read cannot say the comment is missing: the entry waits.
+      defer(run, run.stopped ?? "recovery");
+      return;
+    }
+    if (!health.hasMachineMarkerLine(comments, marker)) {
+      assertPublicText(notification.text, { fixed: FIXED_COUNTS });
+      await health.createComment(
+        run.github,
+        health.HEALTH_REPO,
+        issue.number,
+        `${marker}\n\n${notification.text}`,
+      );
+      run.hooks.afterAction?.(notification.text === health.ROTATION_TEXT ? "health-rotation" : "health-comment");
+    }
+    run.health.notifications = run.health.notifications.filter((entry) => entry.id !== notification.id);
+    health.writeHealth(run.dir, run.health);
+  }
+}
+
+// Stale or invalid facts: the health phase only, no loop step, no covered day.
 async function staleRun(run, reason) {
-  const previous = run.health.runs.at(-1) ?? null;
-  const rotationDue = previous?.rotation_due === true;
-  const entry = health.runEntry({
-    day: run.today,
-    status: "error",
-    notes: [reason],
-    held: {},
-    deferred: run.deferred,
-    rotationDue,
-  });
-  const body = health.healthBody({ status: "error", notes: entry.notes, rotationDue, deferred: entry.deferred });
-  assertPublicText(body, { noDigits: true });
-  await syncHealthIssue(run, body, previous, entry);
-  run.health.runs.push(entry);
-  health.writeHealth(run.dir, run.health);
-  health.writeHeartbeat(run.dir, run.today);
-  return 0;
+  return await endRun(run, { run: { status: "error", notes: [reason], token_age_days: null }, held: {} });
 }
 
-// Runs 1 phase of the loop work. A call over the soft limit ends that phase
-// and counts the rest deferred, so the health issue is still written.
+// Runs 1 phase of the loop work. A call over the soft limit or past the
+// deadline ends that phase and counts the rest deferred.
 async function stopOnBudget(run, phase) {
   try {
     await phase();
   } catch (error) {
-    if (!(error instanceof BudgetError)) throw error;
-    run.stopped = run.stopped ?? "budget";
-    defer(run, "budget");
-  }
-}
-
-async function syncHealthIssue(run, body, previous, entry) {
-  let issue = await health.findHealthIssue(run.github);
-  if (issue === null) {
-    issue = await health.createHealthIssue(run.github, body);
-    run.hooks.afterAction?.("health-create");
-  } else if (issue.body !== body) {
-    await health.setIssueBody(run.github, health.HEALTH_REPO, issue.number, body);
-    run.hooks.afterAction?.("health-body");
-  }
-  const statusText =
-    previous !== null && previous.status === "ok" && entry.status !== "ok"
-      ? `The triage job run status changed from ok to ${entry.status}.`
-      : null;
-  const rotationText = entry.rotation_due === true && previous?.rotation_due !== true ? health.ROTATION_TEXT : null;
-  if (statusText === null && rotationText === null) return;
-
-  // A comment of the previous run's day or later is already 1 of these: a
-  // rerun writes no second 1, also when it runs on the next day.
-  const since = previous === null ? `${run.today}T00:00:00Z` : `${previous.day}T00:00:00Z`;
-  const existing = await health.commentsSince(run.github, issue.number, since, { gate: () => gate(run) });
-  if (existing === null) {
-    // An incomplete read cannot say the comment is missing: none is sent.
-    defer(run, run.stopped ?? "recovery");
-    return;
-  }
-  if (statusText !== null && !health.hasMachineComment(existing, statusText)) {
-    await health.createComment(run.github, health.HEALTH_REPO, issue.number, statusText);
-    run.hooks.afterAction?.("health-comment");
-  }
-  if (rotationText !== null && !health.hasMachineComment(existing, rotationText)) {
-    await health.createComment(run.github, health.HEALTH_REPO, issue.number, rotationText);
-    run.hooks.afterAction?.("health-rotation");
+    if (error instanceof BudgetError) {
+      run.stopped = run.stopped ?? "budget";
+      defer(run, "budget");
+      return;
+    }
+    if (error instanceof DeadlineError) {
+      run.stopped = run.stopped ?? "deadline";
+      defer(run, "deadline");
+      return;
+    }
+    throw error;
   }
 }
 
 // published.json is lost: the state comes back from the job's own issues. The
 // markers of each issue set the cycle, the state and the boundary in sync().
 async function rebuild(run) {
-  const answer = run.github.searchIssuePages(REBUILD_QUERY);
+  const answer = run.github.searchIssuePages(REBUILD_QUERY, { gate: () => gate(run) });
   // A read that is not complete cannot be the state of the job.
   if (answer === null) return null;
   const doc = emptyPublished();
   for (const hit of answer.items) {
-    const repo = typeof hit?.repository?.full_name === "string" ? hit.repository.full_name : null;
-    if (repo === null) continue;
+    // A REST search item gives its repository as `repository_url`.
+    const match = REPO_URL.exec(typeof hit?.repository_url === "string" ? hit.repository_url : "");
+    if (match === null) continue;
+    const repo = match[1];
     if (!Number.isSafeInteger(hit?.number)) continue;
     const parsed = parseIssueBody(hit?.body ?? "");
     if (parsed === null) continue;
@@ -638,6 +670,18 @@ async function restoreReleased(run, entry) {
       defer(run, error.reason);
       return false;
     }
+    if (error instanceof DeliveryStop) {
+      entry.released_day = null;
+      entry.feature_index = null;
+      defer(run, "deadline");
+      return false;
+    }
+    if (error instanceof DeadlineError) {
+      entry.released_day = null;
+      entry.feature_index = null;
+      defer(run, "deadline");
+      return false;
+    }
     throw error;
   }
 }
@@ -683,8 +727,13 @@ async function compareStatus(run, repo, base, head) {
   return status;
 }
 
-function containsFix(status) {
-  return status === "ahead" || status === "identical";
+// The containment of the fix in a delivery: true for `ahead` or `identical`,
+// false for `behind` or `diverged`, and unknown for everything else (a 404, an
+// unexpected status). An unknown probe stops the search of that key.
+function containment(status) {
+  if (status === "ahead" || status === "identical") return true;
+  if (status === "behind" || status === "diverged") return false;
+  return null;
 }
 
 // The fix boundary of an app problem. With no closer, the oldest release
@@ -707,7 +756,9 @@ async function appBoundary(run, entry, info) {
   const at = await firstTrue(candidates.length, async (index) => {
     if (!gate(run)) throw new Deferred(run.stopped ?? "deadline");
     const status = await compareStatus(run, entry.repo, info.closerSha, candidates[index].item.tag_name);
-    return containsFix(status);
+    const fixed = containment(status);
+    if (fixed === null) throw new Deferred("recovery");
+    return fixed;
   });
   if (at === null) return null;
   return { boundary: { type: "app", version: candidates[at].version }, releasedDay: candidates[at].day };
@@ -743,9 +794,12 @@ async function imageBoundary(run, info, images) {
     const at = await firstTrue(tags.length, async (index) => {
       if (!gate(run)) throw new Deferred(run.stopped ?? "deadline");
       const labels = await run.sources.imageLabels(image.id, tags[index]);
-      if (labels.sourceSha === null) return false;
+      // No source commit on the tag is no answer: the search of this key stops.
+      if (labels.sourceSha === null) throw new Deferred("recovery");
       const status = await compareStatus(run, IMAGE_REPO, info.closerSha, labels.sourceSha);
-      return containsFix(status);
+      const fixed = containment(status);
+      if (fixed === null) throw new Deferred("recovery");
+      return fixed;
     });
     if (at === null) return null;
     const labels = await run.sources.imageLabels(image.id, tags[at]);
@@ -860,6 +914,10 @@ async function stepMerged(run, published, key, entry, info) {
     }
     if (error instanceof Deferred) {
       defer(run, error.reason);
+      return;
+    }
+    if (error instanceof DeadlineError || error instanceof DeliveryStop) {
+      defer(run, "deadline");
       return;
     }
     throw error;

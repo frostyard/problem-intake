@@ -12,6 +12,15 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
+// The run's deadline passed: no read starts, and none finishes past it.
+export class DeliveryStop extends Error {
+  constructor() {
+    super("delivery: deadline");
+    this.name = "DeliveryStop";
+    this.code = "deadline";
+  }
+}
+
 export class DeliveryError extends Error {
   constructor(code = "source_unavailable") {
     super(`source: ${code}`);
@@ -51,7 +60,9 @@ function nextLink(answer) {
 // -> { sourceSha, created }, and featureVersions(feature) -> [version]. Each
 // answer is cached in memory for the run. `fetch` is globalThis.fetch in
 // production and a stub in the tests.
-export function createDelivery({ config, fetch: fetchImpl = globalThis.fetch } = {}) {
+// `clock` and `deadline` are the run's: every registry request and every index
+// read checks them first, and its timeout is the time left, at most 20 seconds.
+export function createDelivery({ config, fetch: fetchImpl = globalThis.fetch, clock = Date.now, deadline = null } = {}) {
   const cache = new Map();
   const fixture = config?.sources ?? null;
   const registryUrl = config?.registryUrl ?? "https://ghcr.io/";
@@ -75,14 +86,25 @@ export function createDelivery({ config, fetch: fetchImpl = globalThis.fetch } =
     }
   }
 
+  // The time 1 read may take: the time left before the deadline, at most 20
+  // seconds. With no time left the read does not start.
+  function readTimeout() {
+    if (deadline === null) return TIMEOUT_MS;
+    const left = deadline - clock();
+    if (left <= 0) throw new DeliveryStop();
+    return Math.max(1, Math.min(TIMEOUT_MS, left));
+  }
+
   async function request(url, { accept, token } = {}) {
     const headers = {};
     if (accept !== undefined) headers.accept = accept;
     if (token !== undefined) headers.authorization = `Bearer ${token}`;
+    const timeout = readTimeout();
     let answer;
     try {
-      answer = await fetchImpl(url, { headers, redirect: "follow", signal: AbortSignal.timeout(TIMEOUT_MS) });
-    } catch {
+      answer = await fetchImpl(url, { headers, redirect: "follow", signal: AbortSignal.timeout(timeout) });
+    } catch (error) {
+      if (error instanceof DeliveryStop) throw error;
       throw new DeliveryError("unreachable");
     }
     return answer;
@@ -176,10 +198,12 @@ export function createDelivery({ config, fetch: fetchImpl = globalThis.fetch } =
       return sumVersions(text, feature);
     }
     return cached(`index:${feature}`, async () => {
+      const timeout = readTimeout();
       let answer;
       try {
-        answer = await fetchImpl(`${indexUrl}${feature}/SHA256SUMS`, { signal: AbortSignal.timeout(TIMEOUT_MS) });
-      } catch {
+        answer = await fetchImpl(`${indexUrl}${feature}/SHA256SUMS`, { signal: AbortSignal.timeout(timeout) });
+      } catch (error) {
+        if (error instanceof DeliveryStop) throw error;
         throw new DeliveryError("unreachable");
       }
       // A feature with no index has no version: an empty list, not a failure.

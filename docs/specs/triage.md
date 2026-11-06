@@ -65,7 +65,7 @@ The state folder is `~/.local/state/problem-triage/`, mode `0700`, owner
 | --- | --- | --- |
 | `facts.json` | `0600` | the document of [the facts schema](#the-facts-schema-frostyardproblem-triage-facts1) |
 | `published.json` | `0600` | 1 entry for each tracked problem key ([Close the loop](#close-the-loop)) |
-| `health.json` | `0600` | the last 7 runs (`day`, `run.status`, `notes`, the held counts, the deferred counts by reason, `rotation_due`), `last_read` (GlitchTip issue id to the day the reader last read it) and `issue_keys` (GlitchTip issue id to problem key, for each issue whose key the reader learned from its first event page; ids and keys only, no report value) |
+| `health.json` | `0600` | the last 7 runs (`day`, `run.status`, `notes`, the held counts, the deferred counts by reason, `rotation_due`), `notifications` (the pending health comments of the publisher: a random id, the fixed text, the day it was made), `last_read` (GlitchTip issue id to the day the reader last read it) and `issue_keys` (GlitchTip issue id to problem key, for each issue whose key the reader learned from its first event page; ids and keys only, no report value) |
 | `heartbeat` | `0600` | the day (`YYYY-MM-DD`) of the last run whose publisher ended |
 | `watchdog` | `0600` | the day (`YYYY-MM-DD`) of the last watchdog warning; a warning is written once for each outage |
 | `cache/` | `0700` | `git/<owner>__<repo>` clones of the routed repositories, and the registry and index answers of the run |
@@ -714,9 +714,11 @@ existing `gh` sign-in.
   count. The publisher sets its body each run (an unchanged body is not sent
   again), and adds a comment only when `run.status` turns from `ok` to another
   value, and once when token rotation turns due (token day 335), with the fixed text "The GlitchTip read token is
-  due for rotation." Before such a comment it reads the health issue comments
-  since the day of the previous run, so a crash after the comment sends no
-  second 1. A run that never completes is the watchdog's comment, not the
+  due for rotation." Each such comment is first written as a pending entry of
+  `health.json` `notifications` with a random id, then posted with the first
+  line `<!-- problem-triage-health:1 id=<id> -->`, then removed. A pending entry
+  whose comment is already on the issue is removed with no second comment, and
+  an entry that a limit stops waits for the next run. A run that never completes is the watchdog's comment, not the
   publisher's.
 - **Watchdog.** `scripts/triage/watchdog.mjs` runs at 12:00
   America/New_York. When `heartbeat` is missing or older than 2 days, it adds
@@ -767,7 +769,8 @@ cover a crash after the issue create, after a comment and after a reopen.
 
 When `published.json` is lost (a rebuild of the team VM), the publisher
 finds its issues with the search API (`search/issues`, 100 for each page, each
-page 1 call). When the search holds more than 1000 issues, or a page fails, the
+page 1 call). When the search holds more than 1000 issues, a page fails or
+says `incomplete_results`, or the items do not reach `total_count`, the
 rebuild is incomplete: the publisher writes no `published.json`, does no loop
 step, files no issue, and writes the health issue; the next run tries again. A
 read that stops at a page cap (comments, releases) is incomplete too: that key
@@ -815,7 +818,9 @@ again from the recovery day.
      oldest containing delivery by binary search over the releases (by publish
      time) or the image tags (numeric), 1 compare for each probe. It assumes
      that containment is monotonic in that order: a later delivery of the
-     default branch holds every earlier fix.
+     default branch holds every earlier fix. Only `ahead` or `identical`
+     contains the fix and only `behind` or `diverged` does not; a probe whose
+     answer is unknown (a missing source label, a 404) makes the key wait.
    - `sysext_update_failed`, or an issue transferred to another repository: the
      publisher cannot map a fix to a delivery by itself, so the owner adds 1
      comment line, `Fixed in: image <id> <14 digits>` (1 line for each image) or

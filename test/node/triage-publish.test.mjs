@@ -202,7 +202,7 @@ function filedComment(key, cycle = 1) {
 
 // ------------------------------------------------------------------ a world
 
-function makeWorld({ repos = {}, labels = {} } = {}) {
+function makeWorld({ repos = {}, labels = {}, sources = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "triage-publish-"));
   temps.push(dir);
   const stateDir = join(dir, "state");
@@ -216,10 +216,11 @@ function makeWorld({ repos = {}, labels = {} } = {}) {
     ...process.env,
     TRIAGE_TEST: "1",
     TRIAGE_STATE_DIR: stateDir,
-    TRIAGE_SOURCES: sourcesDir,
     FAKE_GH_STATE: ghStatePath,
     PATH: `${FAKE_GH_DIR}:${process.env.PATH}`,
   };
+  // `sources: false` runs the production registry reads against a stub fetch.
+  if (sources) env.TRIAGE_SOURCES = sourcesDir;
   return { dir, stateDir, sourcesDir, ghStatePath, env };
 }
 
@@ -258,6 +259,17 @@ function setRelease(world, repo, releases) {
   state.repos[repo] ??= { issues: [] };
   state.repos[repo].releases = releases;
   writeGh(world, state);
+}
+
+// The compare answers of a release list, oldest first: `containing` names the
+// tags that hold the fix, and every other tag answers `diverged` (the search
+// demands an answer for each probe).
+function compareMap(sha, releases, containing) {
+  const map = {};
+  for (const release of releases) {
+    map[`${sha}...${release.tag_name}`] = containing.includes(release.tag_name) ? "ahead" : "diverged";
+  }
+  return map;
 }
 
 function setCompare(world, repo, pairs) {
@@ -847,7 +859,10 @@ test("a merged app issue is released at the first release with the fix commit", 
     { tag_name: "v0.15.0", published_at: "2026-11-20T12:00:00Z", draft: false, prerelease: false },
     { tag_name: "v0.16.0-rc.1", published_at: "2026-11-21T00:00:00Z", draft: false, prerelease: true },
   ]);
-  setCompare(world, "frostyard/chairlift", { "fix1...v0.15.0": "ahead" });
+  setCompare(world, "frostyard/chairlift", {
+    "fix1...v0.14.0": "diverged",
+    "fix1...v0.15.0": "ahead",
+  });
   writeFacts(world, factsDoc({ problems: [] }));
 
   assert.equal(await run(world), 0);
@@ -1618,9 +1633,9 @@ test("a comment is added only when the status turns from ok", async () => {
   writeFacts(world, factsDoc({ status: "auth" }));
   assert.equal(await run(world), 0);
   assert.equal(commentPosts(world).length, 1);
-  assert.equal(
+  assert.match(
     commentBodies(world, "frostyard/problem-intake", 1).at(-1),
-    "The triage job run status changed from ok to auth.",
+    /^<!-- problem-triage-health:1 id=[0-9a-f]{16} -->\n\nThe triage job run status changed from ok to auth\.$/,
   );
 
   assert.equal(await run(world), 0);
@@ -1636,7 +1651,10 @@ test("the rotation comment is written once, from token day 335", async () => {
   writeFacts(world, factsDoc({ tokenAgeDays: 335 }));
   assert.equal(await run(world), 0);
   assert.equal(commentPosts(world).length, 1);
-  assert.equal(commentBodies(world, "frostyard/problem-intake", 1).at(-1), "The GlitchTip read token is due for rotation.");
+  assert.match(
+    commentBodies(world, "frostyard/problem-intake", 1).at(-1),
+    /^<!-- problem-triage-health:1 id=[0-9a-f]{16} -->\n\nThe GlitchTip read token is due for rotation\.$/,
+  );
   assert.ok(ghState(world).repos["frostyard/problem-intake"].issues[0].body.includes("- token rotation due: yes"));
 
   writeFacts(world, factsDoc({ tokenAgeDays: 336 }));
@@ -1752,8 +1770,9 @@ test("the 10 minute deadline stops the loop work and keeps the health issue", as
   let reads = 0;
   const clock = () => {
     reads += 1;
-    // The first reading starts the run; every later 1 is past 10 minutes.
-    return reads === 1 ? 0 : 11 * 60 * 1000;
+    // The first reading starts the run; every later 1 is 30 seconds past the
+    // 10 minute deadline, inside the 60 second reserve of the health phase.
+    return reads === 1 ? 0 : 10 * 60 * 1000 + 30 * 1000;
   };
 
   assert.equal(await run(world, { hooks: { clock } }), 0);
@@ -2229,6 +2248,10 @@ test("the rebuild reads the search/issues pages, 1 counted call for each", async
     const built = issueFor(problem);
     addIssue(world, "frostyard/snosi", { number: i, title: built.title, body: built.body, comments: [filedComment(keyOf(i))] });
   }
+  // A hit of another organization is skipped: its repository_url is not ours.
+  const foreign = unitProblem({ key: keyOf(99), unit: "foreign.service" });
+  const foreignBuilt = issueFor(foreign);
+  addIssue(world, "evil/snosi", { number: 1, title: foreignBuilt.title, body: foreignBuilt.body, comments: [filedComment(keyOf(99))] });
   writeFacts(world, factsDoc({}));
 
   assert.equal(await run(world), 0);
@@ -2264,7 +2287,7 @@ test("a release far back is found by reading every page", async () => {
   setRelease(world, "frostyard/chairlift", releases);
   // Containment is monotonic: the newest release holds the fix, and every
   // release before it does not (index 0 of the array is the newest).
-  setCompare(world, "frostyard/chairlift", { "fix1...v1.0.0": "ahead" });
+  setCompare(world, "frostyard/chairlift", compareMap("fix1", releases, ["v1.0.0"]));
   writeFacts(world, factsDoc({ problems: [] }));
 
   assert.equal(await run(world), 0);
@@ -2570,23 +2593,14 @@ test("the oldest release that holds the fix costs at most 7 compares", async () 
   });
   // 40 releases, newest first: the newest 5 hold the fix, so the oldest 1 that
   // holds it is v1.4.0.
-  setRelease(
-    world,
-    "frostyard/chairlift",
-    Array.from({ length: 40 }, (_, i) => ({
-      tag_name: `v1.${i}.0`,
-      published_at: new Date(Date.parse("2026-12-31T12:00:00Z") - i * 3_600_000).toISOString(),
-      draft: false,
-      prerelease: false,
-    })),
-  );
-  setCompare(world, "frostyard/chairlift", {
-    "fix1...v1.0.0": "ahead",
-    "fix1...v1.1.0": "ahead",
-    "fix1...v1.2.0": "ahead",
-    "fix1...v1.3.0": "ahead",
-    "fix1...v1.4.0": "identical",
-  });
+  const releases = Array.from({ length: 40 }, (_, i) => ({
+    tag_name: `v1.${i}.0`,
+    published_at: new Date(Date.parse("2026-12-31T12:00:00Z") - i * 3_600_000).toISOString(),
+    draft: false,
+    prerelease: false,
+  }));
+  setRelease(world, "frostyard/chairlift", releases);
+  setCompare(world, "frostyard/chairlift", compareMap("fix1", releases, ["v1.0.0", "v1.1.0", "v1.2.0", "v1.3.0", "v1.4.0"]));
   writeFacts(world, factsDoc({ problems: [] }));
 
   assert.equal(await run(world), 0);
@@ -2619,17 +2633,18 @@ test("a health comment is not repeated by a run on the next day", async () => {
   assert.equal(commentBodies(world, "frostyard/problem-intake", 1).length, 1);
 });
 
-test("a health comment after 150 others is still found", async () => {
+test("a delivered notification after 150 other comments is not repeated", async () => {
   const world = makeWorld({ labels: {} });
+  const id = "0123456789abcdef";
   const comments = [];
   for (let i = 0; i < 150; i += 1) {
-    comments.push({ author: "a-drive-by", association: "NONE", body: `chatter ${i}`, createdAt: "2026-11-20T10:00:00Z" });
+    comments.push({ author: "a-drive-by", association: "NONE", body: `chatter ${i}`, createdAt: "2026-11-21T10:00:00Z" });
   }
   comments.push({
     author: "frostyard-machines",
     association: "MEMBER",
-    body: "The triage job run status changed from ok to auth.",
-    createdAt: "2026-11-20T12:00:00Z",
+    body: `<!-- problem-triage-health:1 id=${id} -->\n\nThe GlitchTip read token is due for rotation.`,
+    createdAt: "2026-11-21T12:00:00Z",
   });
   addIssue(world, "frostyard/problem-intake", {
     number: 1,
@@ -2638,20 +2653,21 @@ test("a health comment after 150 others is still found", async () => {
     labels: ["problem-report"],
     comments,
   });
+  // A notification of an earlier run that crashed before it was removed.
   writeHealthFile(world, {
     schema: "frostyard.problem-triage-health/1",
-    runs: [{ day: "2026-11-20", status: "ok", notes: [], held: {}, deferred: {}, rotation_due: false }],
+    runs: [],
+    notifications: [{ id, text: "The GlitchTip read token is due for rotation.", since: DAY }],
     last_read: {},
     issue_keys: {},
   });
-  writeFacts(world, factsDoc({ status: "auth" }));
+  writeFacts(world, factsDoc({}));
 
   assert.equal(await run(world), 0);
   assert.equal(commentPosts(world).length, 0);
-  assert.equal(commentBodies(world, "frostyard/problem-intake", 1).length, 151);
   // The read went to the second page, and it was complete.
   assert.equal(calls(world, "issues/1/comments").length, 2);
-  assert.equal(readHealth(world).runs.at(-1).deferred.recovery, 0);
+  assert.deepEqual(readHealth(world).notifications, []);
 });
 
 test("the deadline stops the release search between 2 pages", async () => {
@@ -2679,7 +2695,7 @@ test("the deadline stops the release search between 2 pages", async () => {
   const clock = () => {
     reads += 1;
     // The run starts at 0; from the 5th reading on, the deadline has passed.
-    return reads <= 4 ? 0 : 11 * 60 * 1000;
+    return reads <= 4 ? 0 : 10 * 60 * 1000 + 30 * 1000;
   };
 
   assert.equal(await run(world, { hooks: { clock } }), 0);
@@ -2687,4 +2703,282 @@ test("the deadline stops the release search between 2 pages", async () => {
   assert.equal(readHealth(world).runs.at(-1).deferred.deadline > 0, true);
   assert.equal(ghState(world).repos["frostyard/problem-intake"].issues.length, 1);
   assert.equal(readHeartbeat(world), DAY);
+});
+
+// ---------------------------------------------------------------------------
+// The blocking points of re-review 2
+// ---------------------------------------------------------------------------
+
+function seedJobIssues(world, count, repo = "frostyard/snosi") {
+  for (let i = 1; i <= count; i += 1) {
+    const problem = unitProblem({ key: keyOf(i), unit: `unit-${i}.service` });
+    const built = issueFor(problem);
+    addIssue(world, repo, { number: i, title: built.title, body: built.body, comments: [filedComment(keyOf(i))] });
+  }
+}
+
+test("a search answer with incomplete_results is no rebuild", async () => {
+  const world = makeWorld({ labels: { "frostyard/snosi": ["problem-report"] } });
+  seedJobIssues(world, 3);
+  const state = ghState(world);
+  state.searchIncomplete = true;
+  writeGh(world, state);
+  writeFacts(world, factsDoc({ problems: [unitProblem({ key: keyOf(9), unit: "other.service" })] }));
+
+  assert.equal(await run(world), 0);
+  assert.equal(existsSync(join(world.stateDir, "published.json")), false);
+  assert.deepEqual(issuePosts(world), []);
+  assert.deepEqual(calls(world, "graphql"), []);
+  assert.equal(readHealth(world).runs.at(-1).deferred.recovery, 1);
+});
+
+test("a short search page that leaves hits unread is no rebuild", async () => {
+  const world = makeWorld({ labels: { "frostyard/snosi": ["problem-report"] } });
+  seedJobIssues(world, 130);
+  // GitHub reports 250 hits but answers 130: 120 stayed unread.
+  const state = ghState(world);
+  state.searchTotalCount = 250;
+  writeGh(world, state);
+  writeFacts(world, factsDoc({}));
+
+  assert.equal(await run(world), 0);
+  assert.equal(existsSync(join(world.stateDir, "published.json")), false);
+  assert.deepEqual(calls(world, "graphql"), []);
+  assert.equal(readHealth(world).runs.at(-1).deferred.recovery, 1);
+});
+
+test("exactly 1000 hits take 10 pages and no page 11", async () => {
+  const world = makeWorld({
+    labels: {
+      "frostyard/snosi": ["problem-report"],
+      "frostyard/chairlift": ["problem-report"],
+      "frostyard/nsl": ["problem-report"],
+      "frostyard/updex": ["problem-report"],
+    },
+  });
+  // 1000 job issues over 4 repositories.
+  const repos = ["frostyard/snosi", "frostyard/chairlift", "frostyard/nsl", "frostyard/updex"];
+  for (let i = 1; i <= 1000; i += 1) {
+    const repo = repos[i % 4];
+    const problem = unitProblem({ key: keyOf(i), unit: `unit-${i}.service`, repo });
+    const built = issueFor(problem);
+    addIssue(world, repo, { number: i, title: built.title, body: built.body });
+  }
+  writeFacts(world, factsDoc({}));
+
+  assert.equal(await run(world), 0);
+  const pages = calls(world, "search/issues");
+  assert.equal(pages.length, 10);
+  assert.equal(pages.filter((call) => call.join(" ").includes("page=11")).length, 0);
+  assert.equal(Object.keys(readPublished(world).keys).length, 1000);
+});
+
+test("a capped notification read keeps the entry, and the next run delivers it once", async () => {
+  const world = makeWorld({ labels: {} });
+  const id = "fedcba9876543210";
+  const comments = [];
+  for (let i = 0; i < 120; i += 1) {
+    comments.push({ author: "a-drive-by", association: "NONE", body: `chatter ${i}`, createdAt: "2026-11-21T10:00:00Z" });
+  }
+  addIssue(world, "frostyard/problem-intake", {
+    number: 1,
+    title: "Problem triage health",
+    body: "Operational status of the problem-intake triage job.",
+    labels: ["problem-report"],
+    comments,
+  });
+  writeHealthFile(world, {
+    schema: "frostyard.problem-triage-health/1",
+    runs: [],
+    notifications: [{ id, text: "The GlitchTip read token is due for rotation.", since: DAY }],
+    last_read: {},
+    issue_keys: {},
+  });
+  writeFacts(world, factsDoc({}));
+
+  // 1 page only: more comments may hold the marker, so nothing is sent.
+  assert.equal(await run(world, { hooks: { commentPages: 1 } }), 0);
+  assert.deepEqual(commentPosts(world), []);
+  assert.equal(readHealth(world).notifications.length, 1);
+  assert.equal(readHealth(world).runs.at(-1).deferred.recovery, 1);
+  // The body of the health issue holds that deferral.
+  assert.ok(ghState(world).repos["frostyard/problem-intake"].issues[0].body.includes("- work deferred: yes"));
+
+  // A complete read delivers it once, and then the entry is gone.
+  resetCalls(world);
+  assert.equal(await run(world), 0);
+  assert.equal(commentPosts(world).length, 1);
+  assert.match(commentBodies(world, "frostyard/problem-intake", 1).at(-1), /^<!-- problem-triage-health:1 id=fedcba9876543210 -->\n\nThe GlitchTip read token is due for rotation\.$/);
+  assert.deepEqual(readHealth(world).notifications, []);
+
+  resetCalls(world);
+  assert.equal(await run(world), 0);
+  assert.deepEqual(commentPosts(world), []);
+});
+
+test("ok to auth to ok to auth on 1 day writes 2 status comments", async () => {
+  const world = makeWorld({ labels: {} });
+  writeFacts(world, factsDoc({ status: "ok" }));
+  assert.equal(await run(world), 0);
+
+  writeFacts(world, factsDoc({ status: "auth" }));
+  assert.equal(await run(world), 0);
+  assert.equal(commentPosts(world).length, 1);
+
+  writeFacts(world, factsDoc({ status: "ok" }));
+  assert.equal(await run(world), 0);
+  assert.equal(commentPosts(world).length, 1);
+
+  writeFacts(world, factsDoc({ status: "auth" }));
+  assert.equal(await run(world), 0);
+  assert.equal(commentPosts(world).length, 2);
+  const bodies = commentBodies(world, "frostyard/problem-intake", 1).filter((body) => body.includes("changed from ok to auth"));
+  assert.equal(bodies.length, 2);
+  assert.notEqual(bodies[0], bodies[1], "the 2 notifications hold different ids");
+});
+
+test("a rotation comment that crashed is not written twice the next day", async () => {
+  const world = makeWorld({ labels: {} });
+  writeFacts(world, factsDoc({ tokenAgeDays: 335 }));
+  const crash = {
+    afterAction(name) {
+      if (name === "health-rotation") throw new Error("crash after the rotation comment");
+    },
+  };
+  // No previous run entry at all: the transition is the rotation itself.
+  assert.equal(await run(world, { hooks: crash }), 1);
+  assert.equal(commentPosts(world).length, 1);
+  assert.equal(readHealth(world).notifications.length, 1);
+  assert.equal(readHealth(world).runs.length, 0);
+
+  // The next day, the pending entry is still there and its comment is found.
+  resetCalls(world);
+  writeFacts(world, factsDoc({ day: "2026-11-22", tokenAgeDays: 336 }));
+  assert.equal(await run(world, { now: "2026-11-22T06:15:00Z" }), 0);
+  assert.deepEqual(commentPosts(world), []);
+  assert.equal(commentBodies(world, "frostyard/problem-intake", 1).length, 1);
+  assert.deepEqual(readHealth(world).notifications, []);
+});
+
+test("the deadline stops the rebuild between 2 search pages", async () => {
+  const world = makeWorld({ labels: { "frostyard/snosi": ["problem-report"] } });
+  // 350 hits are 4 pages: 2 are read before the deadline stops the third.
+  seedJobIssues(world, 350);
+  writeFacts(world, factsDoc({}));
+  let reads = 0;
+  const clock = () => {
+    reads += 1;
+    // Readings 1 to 5 are the run's start, page 1 and page 2; the 6th is the
+    // gate of page 3, past the deadline.
+    return reads <= 5 ? 0 : 10 * 60 * 1000 + 30 * 1000;
+  };
+
+  assert.equal(await run(world, { hooks: { clock } }), 0);
+  assert.equal(calls(world, "search/issues").length, 2);
+  assert.equal(existsSync(join(world.stateDir, "published.json")), false);
+  assert.equal(readHealth(world).runs.at(-1).deferred.deadline > 0, true);
+  assert.equal(ghState(world).repos["frostyard/problem-intake"].issues.length, 1);
+});
+
+test("the deadline stops the registry tag pages between 2 of them", async () => {
+  const world = makeWorld({ labels: { "frostyard/snosi": ["problem-report"] }, sources: false });
+  const problem = unitProblem();
+  const built = issueFor(problem);
+  addIssue(world, "frostyard/snosi", {
+    number: 1,
+    title: built.title,
+    body: built.body,
+    state: "closed",
+    stateReason: "COMPLETED",
+    closedAt: "2026-11-20T00:00:00Z",
+    closer: { type: "PullRequest", sha: "fix1" },
+    comments: [{ author: "frostyard-machines", association: "MEMBER", body: markerOf({ key: KEY, cycle: 1, step: "filed" }), createdAt: "2026-11-19T00:00:00Z" }],
+  });
+  writePublishedFile(world, publishedDoc({ [KEY]: issueEntry({ number: 1, marker: markerOf({ key: KEY, cycle: 1, step: "filed" }) }) }));
+  writeFacts(world, factsDoc({ problems: [] }));
+
+  const tags = Array.from({ length: 100 }, (_, i) => `2026110${(i % 9) + 1}093000`);
+  const requests = [];
+  const fetchStub = async (url) => {
+    requests.push(String(url));
+    if (String(url).includes("ghcr.io/token?")) {
+      return new Response(JSON.stringify({ token: "test-token-not-a-real-secret" }), { status: 200 });
+    }
+    if (String(url).includes("page=2")) return new Response(JSON.stringify({ tags }), { status: 200 });
+    return new Response(JSON.stringify({ tags }), {
+      status: 200,
+      headers: { link: '<https://ghcr.io/v2/frostyard/snow/tags/list?page=2>; rel="next"' },
+    });
+  };
+  let reads = 0;
+  const clock = () => {
+    reads += 1;
+    // Readings 1 to 5 are the run's start, the 2 gates and the first 2 registry
+    // reads; the 6th is the second tag page, past the deadline.
+    return reads <= 5 ? 0 : 10 * 60 * 1000 + 30 * 1000;
+  };
+
+  assert.equal(await run(world, { hooks: { clock, fetch: fetchStub } }), 0);
+  assert.equal(requests.filter((url) => url.includes("page=2")).length, 0);
+  assert.equal(readPublished(world).keys[KEY].state, "merged");
+  assert.equal(readHealth(world).runs.at(-1).deferred.deadline > 0, true);
+});
+
+test("an unknown containment of an app release makes the key wait", async () => {
+  const world = makeWorld({ labels: { "frostyard/chairlift": ["problem-report"] } });
+  const problem = appProblem();
+  setupTracked(world, problem, {
+    repo: "frostyard/chairlift",
+    closed: true,
+    stateReason: "COMPLETED",
+    closedAt: "2026-11-20T00:00:00Z",
+    closer: { type: "PullRequest", sha: "fix1" },
+  });
+  const releases = Array.from({ length: 3 }, (_, i) => ({
+    tag_name: `v1.${i}.0`,
+    published_at: new Date(Date.parse("2026-12-31T12:00:00Z") - i * 3_600_000).toISOString(),
+    draft: false,
+    prerelease: false,
+  }));
+  setRelease(world, "frostyard/chairlift", releases);
+  // The middle probe has no answer at all: its containment is unknown.
+  setCompare(world, "frostyard/chairlift", { "fix1...v1.0.0": "diverged", "fix1...v1.2.0": "diverged" });
+  writeFacts(world, factsDoc({ problems: [] }));
+
+  assert.equal(await run(world), 0);
+  assert.equal(readPublished(world).keys[KEY].state, "merged");
+  assert.deepEqual(commentPosts(world), []);
+  assert.equal(readHealth(world).runs.at(-1).deferred.recovery > 0, true);
+});
+
+test("an image tag with no source commit makes the key wait", async () => {
+  const world = makeWorld({ labels: { "frostyard/snosi": ["problem-report"] } });
+  const problem = unitProblem();
+  setupTracked(world, problem, {
+    closed: true,
+    stateReason: "COMPLETED",
+    closedAt: "2026-11-20T00:00:00Z",
+    closer: { type: "PullRequest", sha: "fix1" },
+  });
+  setRegistry(world, "snow", {
+    tags: ["20261101093000", "20261102093000", "20261103093000"],
+    labels: {
+      "20261101093000": imageLabels("1".repeat(40), "2026-11-01T09:30:00Z"),
+      // No source label at all: the containment of this tag is unknown.
+      "20261102093000": { "org.opencontainers.image.created": "2026-11-02T09:30:00Z" },
+      "20261103093000": imageLabels("3".repeat(40), "2026-11-03T09:30:00Z"),
+    },
+  });
+  const state = ghState(world);
+  state.repos["frostyard/snosi"].compare = {
+    [`fix1...${"1".repeat(40)}`]: "diverged",
+    [`fix1...${"3".repeat(40)}`]: "behind",
+  };
+  writeGh(world, state);
+  writeFacts(world, factsDoc({ problems: [] }));
+
+  assert.equal(await run(world), 0);
+  assert.equal(readPublished(world).keys[KEY].state, "merged");
+  assert.deepEqual(commentPosts(world), []);
+  assert.equal(readHealth(world).runs.at(-1).deferred.recovery > 0, true);
 });

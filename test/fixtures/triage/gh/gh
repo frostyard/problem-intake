@@ -249,13 +249,23 @@ if (path === "search/issues") {
       if (wanted === null) {
         if (!/Problem key: [0-9a-f]{16}/.test(body)) continue;
       } else if (!body.includes(`Problem key: ${wanted[1]}`)) continue;
-      hits.push({ repository: { full_name: id }, number: issue.number, title: issue.title ?? "", body, state: issue.state ?? "open" });
+      // The real REST shape of a search hit.
+      hits.push({
+        repository_url: `https://api.github.com/repos/${id}`,
+        number: issue.number,
+        title: issue.title ?? "",
+        body,
+        state: issue.state ?? "open",
+        user: { login: issue.author ?? "frostyard-machines" },
+        labels: (issue.labels ?? []).map((name) => ({ name })),
+      });
     }
   }
   const size = Number.isSafeInteger(perPage) && perPage > 0 ? perPage : 30;
   save(state);
   answer({
     total_count: Number.isSafeInteger(state.searchTotalCount) ? state.searchTotalCount : hits.length,
+    incomplete_results: state.searchIncomplete === true,
     items: hits.slice((page - 1) * size, page * size),
   });
 }

@@ -16,6 +16,15 @@ export class BudgetError extends Error {
   }
 }
 
+// The run's work deadline passed: no work call starts.
+export class DeadlineError extends Error {
+  constructor() {
+    super("github: deadline");
+    this.name = "DeadlineError";
+    this.code = "deadline";
+  }
+}
+
 // `gh` failed. `status` is the HTTP status of a `gh api` error, or null.
 export class GitHubError extends Error {
   constructor(code, status = null) {
@@ -32,6 +41,7 @@ const MIN_CALL_MS = 1_000;
 const HEALTH_RESERVE_MS = 60_000;
 const SEARCH_PER_PAGE = 100;
 const SEARCH_MAX_TOTAL = 1000;
+const SEARCH_MAX_PAGES = 11;
 
 function parseOutput(text, code) {
   const trimmed = String(text ?? "").trim();
@@ -64,17 +74,27 @@ function failedStdout(error) {
 export function createGitHub({ env = process.env, limit = 150, softLimit = limit, clock = null, deadlineAt = null } = {}) {
   let count = 0;
   let soft = Math.max(0, Math.min(softLimit, limit));
+  // The health phase runs after the deadline, in the 60 second reserve.
+  let reserve = false;
 
-  // The time a call may take: at most 60 seconds, and no longer than the time
-  // left to the deadline plus the 60 second reserve of the health issue.
+  function now() {
+    return clock === null ? Date.now() : clock();
+  }
+
+  // The time 1 call may take. The work phase gets the time left before the
+  // deadline only (at most 60 seconds); at or below 0 the call does not start.
+  // The health phase adds its reserve of 60 seconds.
   function callTimeout() {
     if (deadlineAt === null) return MAX_CALL_MS;
-    const left = deadlineAt - (clock === null ? Date.now() : clock()) + HEALTH_RESERVE_MS;
+    const left = deadlineAt - now() + (reserve ? HEALTH_RESERVE_MS : 0);
+    if (left <= 0) throw new DeadlineError();
     return Math.max(MIN_CALL_MS, Math.min(MAX_CALL_MS, left));
   }
 
   function spawnCall(args, input) {
     if (count >= soft) throw new BudgetError();
+    // The timeout is computed before the count, so a refused call is no call.
+    const timeout = callTimeout();
     count += 1;
     try {
       return execFileSync("gh", args, {
@@ -83,7 +103,7 @@ export function createGitHub({ env = process.env, limit = 150, softLimit = limit
         encoding: "utf8",
         stdio: ["pipe", "pipe", "pipe"],
         maxBuffer: MAX_BUFFER,
-        timeout: callTimeout(),
+        timeout,
       });
     } catch (error) {
       if (error?.signal !== undefined && error?.signal !== null) throw new GitHubError("timeout");
@@ -160,14 +180,16 @@ export function createGitHub({ env = process.env, limit = 150, softLimit = limit
     return answer;
   }
 
-  // The `search/issues` API, 1 call for each page of 100, until a page holds
-  // fewer than 100. Returns { items, totalCount }, or null when the read is
-  // incomplete (a page beyond GitHub's 1000 hit cap, or a page of 1 call more
-  // than the run may make).
-  function searchIssuePages(query, { maxItems = SEARCH_MAX_TOTAL } = {}) {
+  // The `search/issues` API, 1 call for each page of 100, until every hit is
+  // read (the collected items reach total_count) or a page is short. Returns
+  // { items, totalCount }, or null when the read is incomplete: a page with
+  // incomplete_results, a hit count over GitHub's 1000 cap, a short page that
+  // leaves hits unread, or a page the gate stopped.
+  function searchIssuePages(query, { maxItems = SEARCH_MAX_TOTAL, gate = null } = {}) {
     const items = [];
     let totalCount = 0;
-    for (let page = 1; ; page += 1) {
+    for (let page = 1; page <= SEARCH_MAX_PAGES; page += 1) {
+      if (gate !== null && !gate()) return null;
       let answer;
       try {
         answer = api("search/issues", {
@@ -175,17 +197,21 @@ export function createGitHub({ env = process.env, limit = 150, softLimit = limit
           fields: { q: query, per_page: SEARCH_PER_PAGE, page },
         });
       } catch (error) {
-        if (error instanceof BudgetError) throw error;
+        if (error instanceof BudgetError || error instanceof DeadlineError) throw error;
         return null;
       }
       if (answer === null || !Array.isArray(answer.items)) return null;
+      if (answer.incomplete_results === true) return null;
       if (page === 1) {
         totalCount = Number(answer.total_count ?? 0);
-        if (totalCount > maxItems) return null;
+        if (!Number.isSafeInteger(totalCount) || totalCount < 0 || totalCount > maxItems) return null;
       }
       items.push(...answer.items);
+      if (items.length >= totalCount) break;
       if (answer.items.length < SEARCH_PER_PAGE) break;
     }
+    // A short page, or the page cap, left hits unread: the read is incomplete.
+    if (items.length < totalCount) return null;
     return { items, totalCount };
   }
 
@@ -198,9 +224,11 @@ export function createGitHub({ env = process.env, limit = 150, softLimit = limit
     remaining: () => Math.max(0, limit - count),
     // True when the loop work must stop: the reserve is all that is left.
     overSoft: () => count >= soft,
-    // The health issue may use the reserve: the soft limit becomes the hard 1.
+    // The health phase may use the whole run: the soft limit becomes the hard
+    // 1, and its calls get the 60 second reserve past the deadline.
     raiseBudget: () => {
       soft = limit;
+      reserve = true;
     },
     limit,
   };

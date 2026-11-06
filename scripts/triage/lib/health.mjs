@@ -4,6 +4,7 @@
 // holds the run status only: no day and no count.
 //
 // node: builtins only: the team VM runs the job with no `npm`.
+import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readJson, writeFileAtomic, writeJsonAtomic } from "./state.mjs";
@@ -31,13 +32,34 @@ export const DEFERRED_REASONS = Object.freeze([
 export const WATCHDOG_TEXT = "The triage job has not completed a run in the last 2 days.";
 export const ROTATION_TEXT = "The GlitchTip read token is due for rotation.";
 
+// The first line of a delivered health comment: the id of its notification.
+export function notificationMarker(id) {
+  return `<!-- problem-triage-health:1 id=${id} -->`;
+}
+
+// A new notification id: 16 random lowercase hex characters.
+export function newNotificationId() {
+  return randomBytes(8).toString("hex");
+}
+
 // The health document, with `last_read` and `issue_keys` as they are on disk
 // (the reader owns those 2 keys).
 export function readHealth(dir) {
   const doc = readJson(join(dir, HEALTH_FILE), null);
-  const health = { schema: HEALTH_SCHEMA, runs: [], last_read: {}, issue_keys: {} };
+  const health = { schema: HEALTH_SCHEMA, runs: [], notifications: [], last_read: {}, issue_keys: {} };
   if (doc === null || typeof doc !== "object" || Array.isArray(doc)) return health;
   if (Array.isArray(doc.runs)) health.runs = doc.runs.filter((run) => run !== null && typeof run === "object");
+  if (Array.isArray(doc.notifications)) {
+    health.notifications = doc.notifications.filter(
+      (entry) =>
+        entry !== null &&
+        typeof entry === "object" &&
+        typeof entry.id === "string" &&
+        /^[0-9a-f]{16}$/.test(entry.id) &&
+        typeof entry.text === "string" &&
+        typeof entry.since === "string",
+    );
+  }
   if (doc.last_read !== null && typeof doc.last_read === "object" && !Array.isArray(doc.last_read)) health.last_read = doc.last_read;
   if (doc.issue_keys !== null && typeof doc.issue_keys === "object" && !Array.isArray(doc.issue_keys)) {
     health.issue_keys = doc.issue_keys;
@@ -45,11 +67,13 @@ export function readHealth(dir) {
   return health;
 }
 
-// Writes `schema` and `runs` (the last 7), and keeps the other 2 keys.
+// Writes `schema`, `runs` (the last 7) and the pending notifications, and
+// keeps the reader's 2 keys.
 export function writeHealth(dir, health) {
   writeJsonAtomic(join(dir, HEALTH_FILE), {
     schema: HEALTH_SCHEMA,
     runs: health.runs.slice(-RUNS_KEPT),
+    notifications: (health.notifications ?? []).map(({ id, text, since }) => ({ id, text, since })),
     last_read: health.last_read ?? {},
     issue_keys: health.issue_keys ?? {},
   });
@@ -63,11 +87,6 @@ export function runEntry({ day, status, notes = [], held = {}, deferred = {}, ro
     counts[reason] = Number.isSafeInteger(count) && count > 0 ? count : 0;
   }
   return { day, status, notes: [...notes], held: { ...held }, deferred: counts, rotation_due: rotationDue === true };
-}
-
-// True when any reason holds a count.
-export function workDeferred(entry) {
-  return Object.values(entry?.deferred ?? {}).some((count) => count > 0);
 }
 
 // The public body of the health issue. No digit and no day.
@@ -171,6 +190,13 @@ export async function commentsSince(github, number, since, { pages = COMMENT_PAG
     if (items.length < COMMENT_PAGE_SIZE) return all;
   }
   return null;
+}
+
+// True when the machine account wrote a comment whose first line is `line`.
+export function hasMachineMarkerLine(comments, line) {
+  return (comments ?? []).some(
+    (comment) => comment?.author?.login === MACHINE && String(comment.body ?? "").split(/\r?\n/)[0] === line,
+  );
 }
 
 // True when the machine account wrote a comment with exactly this text.
