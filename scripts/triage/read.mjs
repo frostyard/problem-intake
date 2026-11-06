@@ -377,6 +377,8 @@ export async function runReader(options = {}) {
       checkCache.set(id, { value });
       return value;
     } catch (error) {
+      // The deadline stops the check; it is no result of the check.
+      if (error instanceof CapError) throw error;
       const wrapped = error instanceof SourceError ? error : new SourceError("check");
       checkCache.set(id, { error: wrapped });
       throw wrapped;
@@ -686,6 +688,7 @@ export async function runReader(options = {}) {
       const issueCount = group.issues.length;
       const entries = group.issues.flatMap((issue) => issue.reports);
       let reason = null;
+      let pending = null;
       try {
         checkDeadline();
         const live = entries.filter((entry) => !isNoise(entry.report));
@@ -742,7 +745,7 @@ export async function runReader(options = {}) {
                   });
                 }
               }
-              problems.push({
+              pending = {
                 key: group.key,
                 repo: group.repo,
                 kind: representative.report.kind,
@@ -754,10 +757,13 @@ export async function runReader(options = {}) {
                 coverage: group.issues.some((issue) => issue.cut) ? "partial" : "complete",
                 first_seen_day: utcDay(Math.min(...group.issues.map((issue) => issue.firstSeenTime))),
                 glitchtip_issue_ids: group.issues.map((issue) => issue.id).sort((a, b) => a - b),
-              });
+              };
             }
           }
         }
+        // A key's result counts only when its checks ended inside the deadline.
+        checkDeadline();
+        if (pending !== null) problems.push(pending);
       } catch (error) {
         if (error instanceof CapError) {
           // The deadline stopped the checks of this key.

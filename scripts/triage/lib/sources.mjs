@@ -9,6 +9,7 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { CapError } from "./glitchtip.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -66,8 +67,17 @@ function samePathNext(header, current) {
 // file:// URLs, and the registry and the index are files.
 export function createSources({ config, stateDir, runGit, fetchImpl = globalThis.fetch, deadline = null, now = Date.now }) {
   // Each read gets its own timeout, cut to the time left before the run's
-  // deadline, so the source checks cannot run the job past it.
-  const limit = (ms) => (deadline === null ? ms : Math.max(1000, Math.min(ms, deadline - now())));
+  // deadline, so the source checks cannot run the job past it. With no time
+  // left no read starts, and a read that fails once the deadline passed is a
+  // CapError (the reader holds the key request_cap), never a SourceError.
+  const expired = () => deadline !== null && now() >= deadline;
+  const stopIfExpired = () => {
+    if (expired()) throw new CapError("deadline");
+  };
+  const limit = (ms) => {
+    stopIfExpired();
+    return deadline === null ? ms : Math.max(1, Math.min(ms, deadline - now()));
+  };
   const gitOptions = () => ({
     timeout: limit(GIT_TIMEOUT_MS),
     maxBuffer: 8 * 1024 * 1024,
@@ -88,10 +98,12 @@ export function createSources({ config, stateDir, runGit, fetchImpl = globalThis
   // (1 for a grep miss when git reported it). Any other failure is the
   // caller's to map to a SourceError.
   async function git(args) {
+    const options = gitOptions();
     try {
-      const result = await runGit([...prefix, ...args], gitOptions());
+      const result = await runGit([...prefix, ...args], options);
       return { code: 0, stdout: typeof result === "string" ? result : String(result?.stdout ?? "") };
     } catch (error) {
+      stopIfExpired();
       const code = Number.isInteger(error?.code) ? error.code : "failed";
       return { code, stdout: typeof error?.stdout === "string" ? error.stdout : "" };
     }
@@ -246,7 +258,9 @@ export function createSources({ config, stateDir, runGit, fetchImpl = globalThis
     let response;
     try {
       response = await fetchImpl(url, { redirect: "error", signal: AbortSignal.timeout(limit(HTTP_TIMEOUT_MS)) });
-    } catch {
+    } catch (error) {
+      if (error instanceof CapError) throw error;
+      stopIfExpired();
       throw new SourceError("http");
     }
     if (response.status === 404) return { status: 404, text: "" };
@@ -256,6 +270,7 @@ export function createSources({ config, stateDir, runGit, fetchImpl = globalThis
     try {
       return { status: response.status, text: await response.text() };
     } catch {
+      stopIfExpired();
       throw new SourceError("http");
     }
   }
@@ -285,7 +300,9 @@ export function createSources({ config, stateDir, runGit, fetchImpl = globalThis
         headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
         signal: AbortSignal.timeout(limit(HTTP_TIMEOUT_MS)),
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof CapError) throw error;
+      stopIfExpired();
       throw new SourceError("registry");
     }
     if (!response.ok) throw new SourceError("registry");
@@ -349,6 +366,8 @@ export function createSources({ config, stateDir, runGit, fetchImpl = globalThis
       imageTagLists.set(image, { ok: true, tags });
       return tags;
     } catch (error) {
+      // The deadline is not a fact about the source: it is not kept.
+      if (error instanceof CapError) throw error;
       const wrapped = error instanceof SourceError ? error : new SourceError("registry");
       imageTagLists.set(image, { ok: false, error: wrapped });
       throw wrapped;
@@ -388,6 +407,7 @@ export function createSources({ config, stateDir, runGit, fetchImpl = globalThis
       indexLists.set(feature, { ok: true, names });
       return names;
     } catch (error) {
+      if (error instanceof CapError) throw error;
       const wrapped = error instanceof SourceError ? error : new SourceError("index");
       indexLists.set(feature, { ok: false, error: wrapped });
       throw wrapped;

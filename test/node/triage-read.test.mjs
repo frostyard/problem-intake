@@ -1389,3 +1389,32 @@ test("an event row in the Sentry camel case form is read too", async () => {
     mock.state.camelEvents = false;
   }
 });
+
+// The deadline inside the last key: a source read that ends after the
+// deadline, and a read that the deadline makes fail, both hold the key
+// request_cap with a partial run, and no further source read starts.
+for (const outcome of ["returns", "fails"]) {
+  test(`the deadline inside the last key's checks (the read ${outcome}): request_cap, partial, no more reads`, async () => {
+    let expired = false;
+    let afterExpiry = 0;
+    const real = (args, options) => new Promise((resolve, reject) => {
+      execFile("git", args, options, (error, stdout) => (error ? reject(Object.assign(error, { stdout })) : resolve({ stdout })));
+    });
+    const run = await read({
+      clock: () => (expired ? NOW + 16 * 60 * 1000 : NOW),
+      runGit: async (args, options) => {
+        if (expired) afterExpiry += 1;
+        expired = true;
+        if (outcome === "fails") throw Object.assign(new Error("the read timed out in this test"), { code: null, killed: true });
+        return await real(args, options);
+      },
+      issues: [issue(307, [{ report: chairliftError(), dateCreated: "2026-11-20T10:00:00Z" }])],
+    });
+    assert.equal(run.facts.run.status, "partial");
+    assert.equal(run.exitCode, 0);
+    assert.equal(run.facts.held.request_cap, 1);
+    assert.equal(run.facts.held.source_unavailable, 0);
+    assert.deepEqual(run.facts.problems, []);
+    assert.equal(afterExpiry, 0);
+  });
+}
