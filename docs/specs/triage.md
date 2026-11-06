@@ -81,6 +81,11 @@ renamed, so a reader never sees half a document.
 While the value is `null`, every problem is held `before_cutoff` and nothing
 is filed. No other key is allowed.
 
+A value that is set MUST be exactly `<date>T00:00:00Z`, where `<date>` is the
+cutoff date (`YYYY-MM-DD`) that the live frostyard.org privacy page states in
+its section `public-bug-reports`. A different date is refused: never an earlier
+date, and no time other than `00:00:00Z`.
+
 ### `triage/routes.json`
 
 | Key | Type | Constraint |
@@ -162,6 +167,9 @@ published.
       "glitchtip_issue_ids": [7]
     }
   ],
+  "watched": [
+    { "key": "9c1d2e3f4a5b6c7d", "coverage": "complete" }
+  ],
   "held": {
     "before_cutoff": 0,
     "unknown_route": 0,
@@ -189,7 +197,7 @@ published.
 | `problems[].kind` | string | the schema `kind` enum, except `crash` and `count` |
 | `problems[].class` | string | the schema enum of the kind's class field ([`src/dimensions.ts`](../../src/dimensions.ts)) |
 | `problems[].fields` | object | exactly the public fields of the kind ([Public fields](#public-fields)), without `frames`, `location`, the app version and the image versions (each of these has its own place, below); each value that can differ between events comes from the representative event ([Reader](#reader) step 7); `variant` only for `tpm_unlock` and `integrity_error`, `code` only for class `error`, `error_class` only when the representative event has 1 |
-| `problems[].frames` | array | 0 to 32 published forms ([Published forms of a frame](#published-forms-of-a-frame)); the frames of the representative event ([Reader](#reader) step 7), empty for every kind except `app_problem` |
+| `problems[].frames` | array | 0 to 32 published forms ([Published forms of a frame](#published-forms-of-a-frame)) of the frames of the representative event ([Reader](#reader) step 7), in order; a frame of the routed module that fails its check at that event's version is `unverified`; empty for every kind except `app_problem` |
 | `problems[].location` | string or null | the schema `location` pattern, or `null` |
 | `problems[].observations` | array | 1 entry for each verified `(image, variant, version, feature_version)`; see below |
 | `problems[].observations[].image` | string | the schema `image.id` enum |
@@ -200,10 +208,26 @@ published.
 | `problems[].coverage` | string | `complete` or `partial` |
 | `problems[].first_seen_day` | string | `^\d{4}-\d{2}-\d{2}$` |
 | `problems[].glitchtip_issue_ids` | array | 1 or more GlitchTip issue row numbers, integers, no duplicates, ascending |
+| `watched` | array | 1 entry for each key whose state in `published.json` is `released`, and no other entry; `[]` when there is none |
+| `watched[].key` | string | `^[0-9a-f]{16}$` |
+| `watched[].coverage` | string | `complete` or `partial`, by the rule below |
 | `held` | object | exactly the 9 reasons below, each a count of problems |
 
 `coverage` is `complete` when every event of the last 30 days was read and
 every source check ran; else `partial`.
+
+**`watched` coverage.** A watched key can collect covered days also when no
+report comes. `complete` means: the issue list was read in full (every page),
+and every GlitchTip issue whose key is that key was read in full for the last
+30 days with every source check run. A key with no GlitchTip issue any more
+(expired or deleted) is `complete` when the issue list was read in full.
+`partial` means: any of its issues was held `source_unavailable` or
+`request_cap`, or `run.status` is not `ok`. A held `unverified_version` or
+`unverified_code` means every observation was dropped, which is a complete
+read with no qualifying observation, so that is not `partial`. The key of an
+issue comes from the raw fingerprint alone
+([Problem key](#problem-key-and-published-forms)), so the reader knows the key
+also of a held issue.
 
 | `held` reason | Meaning |
 | --- | --- |
@@ -211,8 +235,8 @@ every source check ran; else `partial`.
 | `unknown_route` | no route for the kind or the `app_id` |
 | `kind_not_filed` | the kind is in `not_filed` |
 | `noise` | the class is a fault of the environment, not of our code |
-| `unverified_version` | no observation kept a version that passed its check |
-| `unverified_code` | `code`, a frame or `location` failed its check |
+| `unverified_version` | no observation's version passed its check |
+| `unverified_code` | every observation was dropped by its `code`, frame or `location` check |
 | `not_allowlisted` | the unit or the feature is not in `triage/allow/` |
 | `source_unavailable` | a git, registry or index read failed |
 | `request_cap` | the load cap or the deadline stopped the read of that issue |
@@ -224,9 +248,10 @@ A held count counts problems (GlitchTip issues), never events.
 pattern and a forbidden key MUST be refused.
 
 `assertFacts()` in `scripts/triage/lib/facts.mjs` checks the whole document
-before the write: only the keys above, each value against its pattern, and no
-forbidden key at any depth. A document that fails the check is replaced by a
-document with `run.status` `error` and no problems.
+before the write: only the keys above (`schema`, `run`, `problems`, `watched`,
+`held`), each value against its pattern, and no forbidden key at any depth. A
+document that fails the check is replaced by a document with `run.status`
+`error` and no problems.
 
 ## Problem key and published forms
 
@@ -255,20 +280,29 @@ fingerprint (the fingerprint of most of its events) is dropped.
 The published form of `unit`, `feature`, `code`, `location`, `tpm_rc`,
 `app_id` and the class is the value itself, after its check.
 
+The key depends only on the raw fingerprint and on the fixed mapping of
+published forms below. Rule 3 (`unverified`) never enters it: a kept
+observation always holds fingerprint frames of the routed module that verified
+at that observation's own version, so a frame that verifies at 1 release and
+not at a later 1 cannot change the key.
+
 ### Published forms of a frame
 
-A frame is a Go frame of the `app_problem` report. It goes out in 1 of these
-forms, in this order:
+A frame is a Go frame of the `app_problem` report. It is published in 1 of
+these forms:
 
-| Rule | Raw frame | Published form |
-| --- | --- | --- |
-| 1. The placeholder | `other` | `other` |
-| 2. A frame of the routed module that verifies by the frame rule | `github.com/frostyard/chairlift/internal/store.(*Store).Migrate` | the frame itself |
-| 3. A frame of the routed module that does not verify | `github.com/frostyard/chairlift/internal/store.(*Store).Drop` | `unverified` |
-| 4. A standard library frame (the schema list of top-level packages): its first path segment | `net/http.(*Server).Serve` | `net` |
-| 5. `main.<rest>` | `main.main` | `main` |
-| 6. A `github.com/emersion/go-imap/v2` frame | `github.com/emersion/go-imap/v2.(*Client).Read` | `go-imap` |
-| 7. A frame of any other `github.com/frostyard/` module | `github.com/frostyard/updex/v2/internal/index.Write` | `frostyard` |
+| Rule | Raw frame | Published form | In the key |
+| --- | --- | --- | --- |
+| 1. The placeholder | `other` | `other` | yes |
+| 2. A frame of the routed module that the frame rule verifies, at the version of its own observation | `github.com/frostyard/chairlift/internal/store.(*Store).Migrate` | the frame itself | yes, when it is among the first 3 frames |
+| 3. A frame of the routed module that the frame rule does not verify | `github.com/frostyard/chairlift/internal/store.(*Store).Drop` | `unverified` | never |
+| 4. A standard library frame (the schema list of top-level packages): its first path segment | `net/http.(*Server).Serve` | `net` | yes |
+| 5. `main.<rest>` | `main.main` | `main` | yes |
+| 6. A `github.com/emersion/go-imap/v2` frame | `github.com/emersion/go-imap/v2.(*Client).Read` | `go-imap` | yes |
+| 7. A frame of any other `github.com/frostyard/` module | `github.com/frostyard/updex/v2/internal/index.Write` | `frostyard` | yes |
+
+Rule 3 appears only among the frames after the first 3 of the representative
+event: those are shown and never enter the key ([Reader](#reader) step 7).
 
 Rule 7 is the published form of any `github.com/frostyard/` module other than
 the routed one. It narrows core ADR-0074's "top package name" for frostyard
@@ -305,28 +339,37 @@ word `frostyard` keeps free text out of a public issue.
    ([Problem key](#problem-key-and-published-forms)). An event whose raw
    fingerprint differs from the issue's main raw fingerprint is dropped. Each
    other event gives 1 observation `(image, variant, version, feature_version)`.
-   An observation whose version fails its check is dropped and counted in the
-   diagnostics; it does not hold the problem, so a forged event cannot hide
-   real ones.
-6. **Route, filter, verify.** The reader applies [Routing](#routing),
-   [Noise](#noise) and [Verification](#verification). The fingerprint values
-   (`code`, frames, `location`, `unit`, `feature`) are checked once, at the
-   newest verified version. A problem that fails a rule is held: only its
-   reason count is written, never a value.
+6. **Route, filter, verify each observation.** The reader applies
+   [Routing](#routing), [Noise](#noise) and [Verification](#verification). Every
+   check of a fingerprint value runs for each observation, at the tag of that
+   observation's own app version: the version tag, the `code` literal, the
+   frames of the routed module among the first 3 frames, and `location`. An
+   observation whose version fails its check is dropped; an observation whose
+   `code`, frame or `location` check fails is dropped too, so a forged event
+   cannot hide a real 1. A problem with no observation left is held
+   `unverified_version` when no version verified, else `unverified_code`. A
+   problem that fails another rule is held with only its reason count, never a
+   value. The reader keeps the result of each check for 1 `(value, tag)` pair
+   for the rest of the run.
 7. **Representative event, then the write.** A kept event is 1 whose
    observation passed every check. For each problem the representative event is
    chosen from the kept events: for `app_problem`, the newest event by GlitchTip
    event time among those that carry the newest verified app version; for every
-   other kind, the newest kept event by GlitchTip event time. The `code`, frame
-   and `location` checks run at the tag of the newest verified version, so the
-   frames must come from an event of that version. Fields that are not in the
-   fingerprint and can differ between events (`runtime`, `component`,
-   `error_class` of `sysext_update_failed`, `target_version`, `newer_version`,
+   other kind, the newest kept event by GlitchTip event time. The issue shows
+   the frames of the event whose version it shows, so the frames, the version
+   and the key agree. Fields that are not in the fingerprint and can differ
+   between events (`runtime`, `component`, `error_class` of
+   `sysext_update_failed`, `target_version`, `newer_version`,
    `feature_version`, the variant, and the frames after the first 3) take
-   their value from the representative event; `feature_version` is written
-   only when it verified for that event. The reader writes `facts.json`
-   through `assertFacts()`, also when the run failed (`run.status` not `ok`,
-   `problems` empty).
+   their value from the representative event. The frames after the first 3 are
+   checked at the version of the representative event: 1 that fails there is
+   shown as `unverified`, and it never enters the key. `feature_version` is
+   written only when it verified for that event. It also writes 1 `watched`
+   entry for each key whose state in `published.json` is `released`, with the
+   coverage rule of
+   [the facts schema](#the-facts-schema-frostyardproblem-triage-facts1). The
+   reader writes `facts.json` through `assertFacts()`, also when the run failed
+   (`run.status` not `ok`, `problems` empty).
 
 Dropped observations are not counted in `facts.json`: a count of events is a
 count of reports, and `facts.json` holds no report count. The reader writes
@@ -377,9 +420,10 @@ registry and index reads are anonymous.
 | `app_version` | `v<app_version>` is a tag of the routed repository (`git ls-remote --tags`); order is semver 2.0 precedence, so a prerelease is lower than its release | the observation is dropped; none left: held `unverified_version` |
 | `image.version`, `target_version`, `newer_version` | the tag exists in `ghcr.io/frostyard/<image.id>` (registry `tags/list`); order is numeric | as above |
 | sysext `version` | a file `<feature>_<version>_…` is listed in `https://repository.frostyard.org/ext/<feature>/SHA256SUMS`, the index that the feature's `.transfer` file reads | `feature_version` is dropped from that observation |
-| `code` | the literal `"<code>"` (with the quotes) is in the repository at the tag of the newest verified version (`git grep -F`) | held `unverified_code` |
-| `frames` | the frame rule below; at least 1 frame of the routed module must verify | held `unverified_code` |
-| `location` | the file exists at the tag and has at least that many lines | held `unverified_code` |
+| `code` | the literal `"<code>"` (with the quotes) is in the repository at the tag of that observation's `app_version` (`git grep -F`) | that observation is dropped |
+| `frames` | the frame rule below, at the tag of that observation's `app_version` | that observation is dropped |
+| `location` | the file exists at that version's tag and has at least that many lines | that observation is dropped |
+| the shown frames after the first 3 | the frame rule below, at the tag of the representative event's `app_version` | the frame is shown as `unverified`; a problem with no verified frame of the routed module among its shown frames is held `unverified_code` |
 | `unit` | in `triage/allow/units.txt` | held `not_allowlisted` |
 | `feature` | in `triage/allow/features.txt` | held `not_allowlisted` |
 | `bootc_version`, `retries`, `shipped`, the S6 `count` bucket | no check exists | never written |
@@ -387,26 +431,56 @@ registry and index reads are anonymous.
 
 ### The frame rule
 
-An issue shows the frames of the representative event, up to 32, in their
-published form (the definition is in [Reader](#reader) step 7). At least 1 frame of the routed module MUST verify, else the
-problem is held `unverified_code`. A Go panic with no frames and a Rust panic
-with no location are filed with `app_id`, `runtime` and `component` only.
+A frame of the routed module verifies only when the whole frame matches this
+grammar, anchored at both ends, and `git grep` finds its function at the tag of
+the version that its observation carries.
 
-A frame of the routed module has the form `<module>/<pkgpath>.<rest>` or
-`<module>.<rest>`, where `<module>` is the `module` line of the repository's
-`go.mod` at the tag. `<rest>` is 1 of `Name`, `Name[...]` (generic),
-`(*T).Name`, `T.Name`, `(*T[...]).Name`, or any of these followed by `.funcN`
-or `.funcN.M` (a closure; check its parent).
+```text
+^M(/[A-Za-z0-9_-]+)*\.(N\[\.\.\.\]\.N|\(\*N\[\.\.\.\]\)\.N|\(\*N\)\.N|N\[\.\.\.\]|N\.N|N)(\.func[1-9][0-9]{0,2}|\.[1-9][0-9]{0,2}){0,2}$
+```
 
-The check: in `<pkgpath>/*.go` at the tag, not `_test.go`, `git grep -E` finds
-this line, with `Name` replaced by the function name and `T` present only for
-a method:
+- `M` is the `module` line of the repository's `go.mod` at that tag, escaped so
+  that every character of it is literal.
+- `N` is a Go identifier, `[A-Za-z_][A-Za-z0-9_]*`.
+- The optional `/<pkgpath>` is 1 or more segments of `[A-Za-z0-9_-]+`.
+- The base after the last `.` is 1 of `Name`, `Name[...]`, `(*T).Name`,
+  `T.Name`, `(*T[...]).Name`, `T[...].Name`, with `Name` and `T` written as
+  `N`.
+- The generic part is the literal 3 characters `[...]`, as the Go runtime
+  prints it. Any other content between the brackets does not match.
+- Then come 0 to 2 closure suffixes: `.func<digits>` or `.<digits>`, each 1 to
+  3 digits with no leading 0, so `.func1`, `.func1.2` and `.2` are closure
+  suffixes.
+
+A frame of the routed module that does not match the grammar, or whose function
+is not found, is not verified, and it is never published as itself.
+
+The function check: in `<pkgpath>/*.go` at that tag, not `_test.go`, `git grep
+-E` finds this line, with `Name` replaced by the function name and `T` present
+only for a method:
 
 ```sh
 git grep -E '^func (\([a-zA-Z_][a-zA-Z0-9_]* \*?T(\[[^]]*\])?\) )?Name[[(]' -- '<pkgpath>/*.go'
 ```
 
-A frame that does not verify becomes `unverified`
+A closure suffix (`.funcN`, `.N`) is checked on its parent function. A frame
+with no `<pkgpath>`, such as `<module>.Name`, is checked in the `*.go` files at
+the root of the repository at that tag.
+
+So `F[private_token]` and `(*T[x]).F` do not match the grammar. A frame such as
+`F.funcX` or `F.func0` matches the `T.Name` form instead, and the function
+check rejects it when no type `F` has a method of that name. A `<pkgpath>` that
+does not exist at the tag makes `git grep` find nothing. None of these
+verifies.
+
+The issue shows the frames of the representative event, up to 32, in their
+published form ([Reader](#reader) step 7). At least 1 frame of the routed
+module among the shown frames MUST verify at the version of the representative
+event, else the problem is held `unverified_code`. A Go panic with no frames
+and a Rust panic with no location are filed with `app_id`, `runtime` and
+`component` only.
+
+A frame that does not verify is shown as `unverified`
 ([Published forms of a frame](#published-forms-of-a-frame)).
 
 ## Failures
@@ -498,6 +572,11 @@ a number that is not a version.
 `scripts/triage/publish.mjs` reads `facts.json` and writes GitHub with the
 existing `gh` sign-in.
 
+- **Stale or invalid facts.** The publisher refuses a `facts.json` whose
+  `run.day` is not today's UTC day, or that fails `assertFacts()`. It then sets
+  the health status `error`, writes only the health issue, and makes no other
+  GitHub action and no loop progress: no covered day, no marker, no regressed
+  comment.
 - **Trust rule.** The publisher trusts an issue or a comment as its own record
   only when its author is `frostyard-machines`, the issue has the label
   `problem-report`, and the marker's key matches the body's `Problem key:`
@@ -525,8 +604,9 @@ existing `gh` sign-in.
   no" (`yes` from token day 335) and "work deferred: yes or no". No day and no
   count. The publisher rewrites its body each run, and adds a comment only when
   `run.status` turns from `ok` to another value, and once when token rotation
-  turns due (token day 335), with the fixed text "The GlitchTip read token is due for rotation." A run
-  that never completes is the watchdog's comment, not the publisher's.
+  turns due (token day 335), with the fixed text "The GlitchTip read token is
+  due for rotation." A run that never completes is the watchdog's comment, not
+  the publisher's.
 - **Watchdog.** `scripts/triage/watchdog.mjs` runs at 12:00
   America/New_York. When `heartbeat` is missing or older than 2 days, it adds
   1 comment to the health issue: "The triage job has not completed a run in the
@@ -545,7 +625,9 @@ existing `gh` sign-in.
 | `state` | string | `filed`, `merged`, `released`, `verified` or `muted` |
 | `boundary` | string or null | the fix boundary: `app:<semver>`, `image:<id>:<14 digits>[,image:<id>:<14 digits>…]`, or `feature:<name>:<version>` |
 | `released_day` | string or null | `^\d{4}-\d{2}-\d{2}$` |
-| `covered_days` | integer | days with a complete observation since `released_day`; `>= 0` |
+| `covered_days` | integer | days counted since `released_day`; `>= 0` |
+| `last_counted_day` | string or null | `^\d{4}-\d{2}-\d{2}$`, the last UTC day counted toward `covered_days`, so a second run on that day does not count twice |
+| `feature_index` | array or null | the feature versions listed in the feature's `SHA256SUMS` on `released_day`; only for a `feature:` boundary, else `null` |
 | `last_comment_marker` | string or null | the last marker this job wrote |
 
 A day and a count stay internal. No public text holds a day or a count, also
@@ -564,9 +646,18 @@ problem has no fix boundary yet.
 **Recovery.** The publisher writes `published.json` after each GitHub action.
 At the start of each run it reads the job's marker comments of each tracked
 issue (the trust rule above) and takes the highest `(cycle, step)` found as the
-truth. So an action whose state write was lost is not repeated, and a rebuild
-of the team VM loses nothing. The tests cover a crash after the issue create,
-after a comment and after a reopen.
+truth. So an action whose state write was lost is not repeated. The tests
+cover a crash after the issue create, after a comment and after a reopen.
+
+When `published.json` is lost (a rebuild of the team VM), the publisher
+restores `repo`, `number`, `cycle`, `state` and `boundary` from its markers,
+and it repeats no GitHub action. Lost progress is reset, never guessed:
+`covered_days` starts again at 0 and `last_counted_day` at `null`. For a
+`feature:` boundary it reads the feature's `SHA256SUMS` again on the recovery
+day and stores that list as `feature_index`. The cost: a feature version that
+was published between the release and the recovery day is no longer a sign of
+a regression, unless it equals the boundary, so the regression window starts
+again from the recovery day.
 
 **Steps.**
 
@@ -594,17 +685,20 @@ after a comment and after a reopen.
      `Fixed in: feature <name> <version>`. The newest such comment by a trusted
      author wins. The publisher checks that the image tag exists (its `created`
      label gives `released_day`) or that the feature file is in the feature's
-     `SHA256SUMS` (the comment's day is `released_day`, and the publisher keeps
-     the list of feature versions of that index on that day).
+     `SHA256SUMS` (the comment's day is `released_day`, and the publisher stores
+     the list of feature versions of that index on that day in
+     `feature_index`).
 
    The public comment (marker `step=released`) is: "Fix released in
    <boundary>. The job now watches reports for 14 covered days."
 4. **Verified.** `covered_days` reaches 14, with no qualifying observation. A
-   run counts only when `run.status` is `ok` and the problem's `coverage` is
-   `complete`; a missed run, a partial read or a held problem does not count,
-   and it does not reset the count. The public comment (marker `step=verified`)
-   is: "No qualifying reports observed in 14 covered days after <boundary>."
-   This does not prove that every host installed the fix.
+   day counts only when `run.status` is `ok` and the `watched` entry of the key
+   is `complete`; it counts once for each UTC day, and `last_counted_day` stops
+   a second run on that day from counting twice. A missed run and a `partial`
+   entry do not count, and they do not reset the count. The public comment
+   (marker `step=verified`) is: "No qualifying reports observed in 14 covered
+   days after <boundary>." This does not prove that every host installed the
+   fix.
 5. **Regressed.** A qualifying observation has `last_seen_day` on or after
    `released_day`:
    - boundary `app:<version>`: an app version at or above it, by semver
@@ -613,7 +707,7 @@ after a comment and after a reopen.
      above that image's version, numeric; an image that is not in the boundary
      does not qualify;
    - a `feature:` boundary: a `feature_version` equal to it, or a feature
-     version that was not in the stored index list (newer). No order of feature
+     version that was not in `feature_index` (newer). No order of feature
      versions is assumed.
 
    The publisher reopens the issue and comments (marker `step=regressed`,
@@ -651,6 +745,26 @@ and GlitchTip's status stays as GlitchTip sets it.
     GlitchTip URL MUST be on `127.0.0.1` or `localhost`.
 13. The state folder is `0700` and each state file is `0600`.
 14. Only `scripts/triage/publish.mjs` opens a `problem-report` issue.
+15. The publisher refuses a `facts.json` whose `run.day` is not today's UTC day,
+    or that fails `assertFacts()`: it writes only the health issue, with health
+    status `error`, and no loop step runs and no covered day counts.
+
+## Required tests
+
+These fixtures are required, beside the ones above. The reader tests live in
+`test/node/triage-read.test.mjs`, the publisher tests in
+`test/node/triage-publish.test.mjs`.
+
+| Test file | Fixture |
+| --- | --- |
+| reader | The frame grammar, each form of [the frame rule](#the-frame-rule) once matched and once not |
+| reader | The negative frames `F[private_token]`, `(*T[x]).F`, `F.funcX`, and a `<pkgpath>` that does not exist at the tag: none verifies, and none is published as itself |
+| reader | Key stability: the same raw fingerprint at 2 app versions, with 1 frame removed in the newer release, gives the same key or drops the observation; it never gives a new key |
+| reader | A fingerprint value that verifies at version 1 and not at version 2 drops the version 2 observation and keeps the key; with every observation dropped the problem is held `unverified_code` |
+| reader | `watched`: a `released` key with no GlitchTip issue any more is `complete` when the issue list was read in full; a `released` key whose issue was held `source_unavailable` or `request_cap` is `partial`; a `released` key held `unverified_version` is `complete` with no qualifying observation |
+| publisher | Recovery: `published.json` lost, the state comes from the markers, no GitHub action repeats, `covered_days` is 0 and `last_counted_day` `null`; a `feature:` boundary reads `feature_index` again on the recovery day |
+| publisher | Covered days: 1 day counts once, a second run on the same day adds nothing, and a `partial` `watched` entry counts no day |
+| publisher | A stale `facts.json` from yesterday, and 1 that fails `assertFacts()`: health status `error`, only the health issue, no other GitHub action, no covered day |
 
 ## Derived artifacts
 

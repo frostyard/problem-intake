@@ -61,22 +61,27 @@ Facts of GlitchTip 6.2.6, the version that runs
   routed repository, the source at that tag (a code literal, a Go function, a
   Rust file and line), a published tag of `ghcr.io/frostyard/<image>`, the
   published sysext index on `repository.frostyard.org`, or an allowlist in
-  `triage/allow/` of this repository. A value that fails its check is never
-  published: the problem is held, and only a count by reason stays internal.
+  `triage/allow/` of this repository. Each value is checked at the version of
+  the report event that carries it. A value that fails its check is never
+  published: the event is dropped, and only a count by reason stays internal.
 - **Public problem key.** The key is the first 16 lowercase hex characters of
   the SHA-256 of the UTF-8 bytes of `JSON.stringify([kind, class,
   ...publishedGroupKey])`, with no spaces. `publishedGroupKey` is the group
   key of the GlitchTip fingerprint of `src/envelope.ts` with each value in its
-  published form. The raw fingerprint stays internal. More than 1 GlitchTip
-  issue can map to 1 key; the reader merges them into 1 problem. Inside 1
-  GlitchTip issue, an event whose raw fingerprint differs from the issue's
-  main raw fingerprint (the fingerprint of most of its events) is dropped.
+  published form. The raw fingerprint stays internal. So the key depends only
+  on the raw fingerprint and on the fixed mapping of published forms: a frame
+  that verifies at 1 release and not at a later 1 cannot change it, and 1
+  GlitchTip issue keeps 1 key. More than 1 GlitchTip issue can map to 1 key;
+  the reader merges them into 1 problem. Inside 1 GlitchTip issue, an event
+  whose raw fingerprint differs from the issue's main raw fingerprint (the
+  fingerprint of most of its events) is dropped.
 - **Published form of a value.** `unit`, `feature`, `code`, `location`,
   `tpm_rc`, `app_id` and the class go out as they are, after their check. A Go
   frame goes out as: `other` as `other`; a frame of the routed module (the
-  `module` line of the repository's `go.mod` at the tag) that verifies, as it
-  is; a frame of the routed module that does not verify, as `unverified`; a
-  standard library frame as its first path segment (`net/http.(*Server).Serve`
+  `module` line of the repository's `go.mod` at the tag) that matches the
+  frame grammar and whose function the source holds, as it is; a frame of the
+  routed module that does not verify, as `unverified`; a standard library frame
+  as its first path segment (`net/http.(*Server).Serve`
   as `net`); `main.<rest>` as `main`; a `github.com/emersion/go-imap/v2` frame
   as `go-imap`; a frame of any other `github.com/frostyard/` module as the
   fixed word `frostyard`. The last form narrows ADR-0074's "top package name"
@@ -89,16 +94,22 @@ Facts of GlitchTip 6.2.6, the version that runs
   author is the machine account `frostyard-machines`.
 - **The version rule is the loop's authority.** A fix PR names the issue
   (`Fixes #N`). The release that holds the fix starts a window of 14 covered
-  days; a qualifying observation in that window reopens the issue as a
+  days; a key is watched from then on, so a quiet release can be verified with
+  no report, and a qualifying observation in that window reopens the issue as a
   regression. The job never writes to GlitchTip: the read-only token stays
   read-only, and GlitchTip's own issue status follows GlitchTip's rules.
 - **Cutoff.** The job files only problems whose GlitchTip issue was first seen
   on or after `first_seen_cutoff` in `triage/config.json`. Until that value is
-  set, every problem is held and nothing is filed.
+  set, every problem is held and nothing is filed. A set value is exactly
+  `<date>T00:00:00Z` for the cutoff date that the live privacy page states,
+  never an earlier date.
 - **Limits.** For each run: at most 5 new issues, at most 2 for each
   repository, at most 10 comments or reopens, at most 150 GitHub API calls and
   at most 1000 GlitchTip requests; the reader stops at 15 minutes and the
   publisher at 10 minutes. Work over a limit waits for the next run.
+- **A stale run acts on nothing.** The publisher refuses a `facts.json` that is
+  not from today (UTC) or that fails its check: it writes the health status
+  `error` only, and no loop step runs.
 - **What an agent may read.** An agent reads the verified summary
   (`node scripts/triage/read.mjs --summary`), and may read the GlitchTip issue
   level with the read token. It never reads a single event, never uses

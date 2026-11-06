@@ -25,15 +25,19 @@ read it.
 Run from the root of a bketelsen/fleet checkout on the operator workstation:
 
 ```sh
-ssh -t -i ~/.ssh/semaphore-fleet-hosts -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=ansible/ssh/team_known_hosts fleet@10.0.1.176 sudo /usr/local/sbin/problem-triage-set-token
+ssh -t -i ~/.ssh/semaphore-fleet-hosts -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=ansible/ssh/team_known_hosts fleet@10.0.1.176 "sudo /usr/local/sbin/problem-triage-set-token"
 ```
+
+The whole remote command is 1 double-quoted argument. `ssh` joins its
+arguments into 1 line for the remote shell, so a quote that is not inside a
+quoted argument is lost there.
 
 Paste the token at the hidden prompt. It prints `token saved`.
 
 Check it. The output is `team 600`:
 
 ```sh
-ssh -i ~/.ssh/semaphore-fleet-hosts -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=ansible/ssh/team_known_hosts fleet@10.0.1.176 sudo stat -c '%U %a' /var/home/team/.config/problem-triage/glitchtip-read.token
+ssh -i ~/.ssh/semaphore-fleet-hosts -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=ansible/ssh/team_known_hosts fleet@10.0.1.176 "sudo stat -c '%U %a' /var/home/team/.config/problem-triage/glitchtip-read.token"
 ```
 
 Fallback on Minideb:
@@ -93,8 +97,13 @@ The timer stays off until every item below holds:
   ```
 
   It prints `1`.
-- [`triage/config.json`](../../triage/config.json) holds a `first_seen_cutoff`
-  that is not `null`.
+- [`triage/config.json`](../../triage/config.json) holds the cutoff date that
+  the live page states. Open
+  <https://frostyard.org/privacy/problem-reports/#public-bug-reports>, read the
+  cutoff date in that section, and check that the file holds exactly that date
+  with `T00:00:00Z` at the end (for example `2026-11-20T00:00:00Z`). A
+  different value, an earlier date or a time other than `00:00:00Z` stops the
+  go-live.
 
 Then set `problem_triage_enabled` to true in the fleet role `team_vm`, and
 apply it through the Semaphore template "Team VM configure". After the apply,
@@ -124,9 +133,12 @@ hosts and cannot change or delete an issue.
 ## After a rebuild of the team VM
 
 1. R2 again: the backup holds neither the token file nor the state folder.
-2. Nothing else: the publisher rebuilds `published.json` from its own marker
-   comments on the tracked issues, so no issue is filed twice and no loop step
-   is repeated.
+2. The publisher rebuilds `published.json` from its own marker comments on the
+   tracked issues: no issue is filed twice and no loop step is repeated.
+3. Progress is not recovered. `covered_days` starts again at 0 and
+   `last_counted_day` at `null`, and for a `feature:` boundary the index list
+   is read again on the recovery day, so a feature version published in
+   between is no longer a sign of a regression.
 
 ## Copies
 

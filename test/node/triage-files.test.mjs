@@ -3,7 +3,7 @@
 // checkout. No network: the seed test builds its own git repository.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { after } from "node:test";
@@ -121,4 +121,40 @@ test("scripts/triage/seed-allow.mjs writes the 2 allowlists", () => {
   // A commit that is not 40 hex characters is refused, and nothing is written.
   const bad = run(["--snosi", repo, "--commit", "HEAD", "--out", join(tmp, "bad")]);
   assert.equal(bad.status, 2, bad.stdout);
+  assert.ok(!existsSync(join(tmp, "bad")), "the refused run wrote its output folder");
+});
+
+// Every `ssh` command of the runbook, with its wrapped lines joined. `ssh`
+// joins its arguments into 1 line for the remote shell, so a quoted remote
+// command must be 1 double-quoted argument (docs/runbook/triage.md).
+function sshCommands(text) {
+  const lines = text.split("\n");
+  const commands = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i].trim();
+    if (!line.startsWith("ssh ")) continue;
+    let command = line;
+    while (i + 1 < lines.length) {
+      const next = lines[i + 1];
+      if (!/^\s+\S/.test(next) || /^\s+(```|\||#)/.test(next)) break;
+      command += ` ${next.trim()}`;
+      i += 1;
+    }
+    commands.push(command);
+  }
+  return commands;
+}
+
+test("every ssh command of the triage runbook quotes its remote command", () => {
+  const host = "fleet@10.0.1.176";
+  const commands = sshCommands(read("docs/runbook/triage.md"));
+  assert.ok(commands.length >= 2, `found ${commands.length} ssh commands, expected at least 2`);
+  for (const command of commands) {
+    const at = command.indexOf(`${host} `);
+    assert.ok(at >= 0, `no ${host} in: ${command}`);
+    const remote = command.slice(at + host.length + 1).trim();
+    if (!remote.includes("'")) continue;
+    assert.ok(remote.startsWith('"'), `remote command is not 1 double-quoted argument: ${command}`);
+    assert.ok(remote.endsWith('"'), `remote command has no closing quote: ${command}`);
+  }
 });

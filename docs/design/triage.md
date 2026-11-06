@@ -44,7 +44,10 @@ scripts/triage/watchdog.mjs ──► 1 comment on the health issue when no run
 - **`scripts/triage/publish.mjs`** reads `facts.json` and drives the loop:
   dedupe, the limits of a run, the issue body of `assertIssueBody()`, the
   markers, the release checks, the 14 covered days, the regression, and the
-  health issue and `health.json`.
+  health issue and `health.json`. It refuses a `facts.json` that is not from
+  today (UTC) or that fails `assertFacts()`, and then writes the health status
+  only. A key that is released and quiet collects its covered day from the
+  `watched` entry of `facts.json`, so a fix with no new report can verify.
 - **`scripts/triage/watchdog.mjs`** reads `heartbeat` and comments on the
   health issue when it is missing or older than 2 days: "The triage job has
   not completed a run in the last 2 days."
@@ -60,7 +63,9 @@ scripts/triage/watchdog.mjs ──► 1 comment on the health issue when no run
   never the GlitchTip project.
 - **The 2 states.** `facts.json` holds what the last run verified, with days
   and internal GlitchTip issue row numbers. `published.json` holds what the
-  job already did on GitHub, so a rerun and a rebuilt host repeat nothing.
+  job already did on GitHub, so a rerun repeats nothing. The publisher restores
+  it from its own markers after a rebuild of the host, and lost progress is
+  reset, never guessed ([specs/triage.md](../specs/triage.md#close-the-loop)).
 
 ## Host items
 
@@ -124,8 +129,10 @@ is a backstop. Fleet's drift check reports a timer that is not in its set state.
 - **Backup and rebuild.** The Minideb backup of the team VM holds neither
   `~team/.config/problem-triage` nor `~team/.local/state`. After a rebuild the
   token step runs again, and the publisher rebuilds `published.json` from its
-  own marker comments on the tracked issues, so no issue is filed twice and no
-  step is repeated.
+  own marker comments on the tracked issues: no issue is filed twice and no
+  loop step is repeated. Progress is not recovered: `covered_days` starts again
+  at 0, and for a `feature:` boundary the index list is read again on the
+  recovery day.
 - **A bad merge breaks the next run,** because the clone runs `main` the next
   day: the health issue shows it the same morning, and `make ci` runs the
   triage tests before any merge.
