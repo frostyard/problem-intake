@@ -70,24 +70,33 @@ Facts of GlitchTip 6.2.6, the version that runs
   key of the GlitchTip fingerprint of `src/envelope.ts` with each value in its
   published form. The raw fingerprint stays internal. So the key depends only
   on the raw fingerprint and on the fixed mapping of published forms: a frame
-  that verifies at 1 release and not at a later 1 cannot change it, and 1
+  that verifies at 1 release and not at a later 1 cannot change it, a closure
+  suffix is dropped before publication so its number cannot change it, and 1
   GlitchTip issue keeps 1 key. More than 1 GlitchTip issue can map to 1 key;
   the reader merges them into 1 problem. Inside 1 GlitchTip issue, an event
   whose raw fingerprint differs from the issue's main raw fingerprint (the
   fingerprint of most of its events) is dropped.
 - **Published form of a value.** `unit`, `feature`, `code`, `location`,
   `tpm_rc`, `app_id` and the class go out as they are, after their check. A Go
-  frame goes out as: `other` as `other`; a frame of the routed module (the
-  `module` line of the repository's `go.mod` at the tag) that matches the
-  frame grammar and whose function the source holds, as it is; a frame of the
-  routed module that does not verify, as `unverified`; a standard library frame
-  as its first path segment (`net/http.(*Server).Serve`
-  as `net`); `main.<rest>` as `main`; a `github.com/emersion/go-imap/v2` frame
-  as `go-imap`; a frame of any other `github.com/frostyard/` module as the
-  fixed word `frostyard`. The last form narrows ADR-0074's "top package name"
-  for frostyard modules: the path segments after `github.com/frostyard/` are
-  chosen by the sender within the schema pattern, so a segment is free text,
-  and a fixed word keeps free text out.
+  frame goes out as: `other` as `other`; a frame of the routed module that the
+  frame rule verifies, as its parent frame (0 to 2 closure suffixes are
+  dropped, so no closure number goes out); a frame of the routed module that
+  does not verify, as `unverified`; a standard library frame as its first path
+  segment (`net/http.(*Server).Serve` as `net`); `main.<rest>` as `main`; a
+  `github.com/emersion/go-imap/v2` frame as `go-imap`; a frame of any other
+  `github.com/frostyard/` module as the fixed word `frostyard`. The last form
+  narrows ADR-0074's "top package name" for frostyard modules: the path
+  segments after `github.com/frostyard/` are chosen by the sender within the
+  schema pattern, so a segment is free text, and a fixed word keeps free text
+  out.
+- **Frame verification.** A frame belongs to the routed module by the prefix
+  `github.com/frostyard/<repo>`, with an optional `/v<N>` (`triage/routes.json`
+  names the repository), and that prefix is compared with the `module` line of
+  `go.mod` at the observation's release tag. The form of the parent frame
+  decides the source check: a free function needs no receiver, a pointer method
+  needs a receiver of `*T` or `T`, a value method needs a receiver of `T`. So
+  the sender cannot name a package function as a method of a type that has no
+  such method.
 - **1 issue for each problem key, in the repository that owns the code.**
   Routing is by kind and `app_id` ([triage/routes.json](../../triage/routes.json));
   the GlitchTip project is not used. The label is `problem-report` and the

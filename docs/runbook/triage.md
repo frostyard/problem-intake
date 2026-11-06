@@ -135,10 +135,16 @@ hosts and cannot change or delete an issue.
 1. R2 again: the backup holds neither the token file nor the state folder.
 2. The publisher rebuilds `published.json` from its own marker comments on the
    tracked issues: no issue is filed twice and no loop step is repeated.
-3. Progress is not recovered. `covered_days` starts again at 0 and
-   `last_counted_day` at `null`, and for a `feature:` boundary the index list
-   is read again on the recovery day, so a feature version published in
-   between is no longer a sign of a regression.
+3. `released_day` comes back from the same public source as at the release
+   step: the publish day of the release for an `app:` boundary, or the latest
+   `org.opencontainers.image.created` day of the boundary's image tags for an
+   `image:` boundary. For a `feature:` boundary no public source keeps the old
+   day, so it becomes the recovery day, with the index list of that day, and a
+   feature version published in between is no longer a sign of a regression.
+4. Progress is not recovered. `covered_days` starts again at 0 and
+   `last_counted_day` at `null`.
+5. When 1 of those source reads fails, that key stays in recovery: no loop
+   progress and no comment for it, and the next run tries again.
 
 ## Copies
 

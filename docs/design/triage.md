@@ -62,10 +62,14 @@ scripts/triage/watchdog.mjs ──► 1 comment on the health issue when no run
   the key of the job cannot differ. Routing uses the kind and the `app_id`, and
   never the GlitchTip project.
 - **The 2 states.** `facts.json` holds what the last run verified, with days
-  and internal GlitchTip issue row numbers. `published.json` holds what the
-  job already did on GitHub, so a rerun repeats nothing. The publisher restores
-  it from its own markers after a rebuild of the host, and lost progress is
-  reset, never guessed ([specs/triage.md](../specs/triage.md#close-the-loop)).
+  and internal GlitchTip issue row numbers. `health.json` also holds
+  `issue_keys`, the problem key of each GlitchTip issue whose key the reader
+  learned. `published.json` holds what the job already did on GitHub, with the
+  issue ids of each key, so a rerun repeats nothing. The publisher restores it
+  from its own markers after a rebuild of the host: 2 sources give
+  `released_day` back (the release, or the image tag's `created` day), and lost
+  progress is reset, never guessed
+  ([specs/triage.md](../specs/triage.md#close-the-loop)).
 
 ## Host items
 
@@ -130,9 +134,11 @@ is a backstop. Fleet's drift check reports a timer that is not in its set state.
   `~team/.config/problem-triage` nor `~team/.local/state`. After a rebuild the
   token step runs again, and the publisher rebuilds `published.json` from its
   own marker comments on the tracked issues: no issue is filed twice and no
-  loop step is repeated. Progress is not recovered: `covered_days` starts again
-  at 0, and for a `feature:` boundary the index list is read again on the
-  recovery day.
+  loop step is repeated. `released_day` comes back from the release day or the
+  image `created` day; for a `feature:` boundary it is the recovery day, with
+  the index list of that day. Progress is not recovered: `covered_days` starts
+  again at 0. A source read that fails leaves that key in recovery, with no
+  comment, and the next run tries again.
 - **A bad merge breaks the next run,** because the clone runs `main` the next
   day: the health issue shows it the same morning, and `make ci` runs the
   triage tests before any merge.
