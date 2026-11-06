@@ -1,0 +1,27 @@
+# Dependabot (frostyard/core ADR-0071 row B13). This repository has 2 manifests
+# that need updates: the actions the workflows pin (ADR-0021) and the npm
+# dependencies of the Worker and its gate.
+#
+# `glitchtip/compose.yaml` pins its images by tag and digest. A GlitchTip update
+# follows `docs/runbook/glitchtip.md`, so there is no `docker-compose` entry.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    groups:
+      dev-dependencies:
+        dependency-type: "development"
