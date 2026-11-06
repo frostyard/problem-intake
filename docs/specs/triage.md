@@ -84,7 +84,9 @@ is filed. No other key is allowed.
 A value that is set MUST be exactly `<date>T00:00:00Z`, where `<date>` is the
 cutoff date (`YYYY-MM-DD`) that the live frostyard.org privacy page states in
 its section `public-bug-reports`. A different date is refused: never an earlier
-date, and no time other than `00:00:00Z`.
+date, and no time other than `00:00:00Z`. `test/node/triage-files.test.mjs`
+refuses a date that is not a calendar day, and a date before 2026-11-06, the
+first day the section was live (frostyard/frostyard-org dbc9b1d).
 
 ### `triage/routes.json`
 
