@@ -67,6 +67,11 @@ runbook](docs/runbook/glitchtip.md).
 - Public statistics are aggregates only. A cell from 1 to 4 is never
   published, and complementary cells are suppressed so that no small value
   returns by subtraction.
+- A daily triage job can open a public GitHub issue (label `problem-report`) in
+  the owner's repository for a fault in Frostyard code, with only values that
+  it checked against public source: never a report ID, a count or a day
+  ([ADR-0006](docs/adr/0006-a-triage-job-files-verified-problems-as-public-issues.md),
+  [spec](docs/specs/triage.md)).
 - A report can be deleted by its `report_id`
   ([runbook](docs/runbook/glitchtip.md#delete-1-report)).
 
