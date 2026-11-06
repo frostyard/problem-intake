@@ -1418,3 +1418,36 @@ for (const outcome of ["returns", "fails"]) {
     assert.equal(afterExpiry, 0);
   });
 }
+
+// The deadline inside an HTTP source read: the registry answers its headers
+// before the deadline, and its body read fails after it. The key is held
+// request_cap, not source_unavailable, and the run is partial.
+test("the deadline inside a registry body read: request_cap and partial", async () => {
+  let expired = false;
+  const run = await read({
+    sources: null,
+    clock: () => (expired ? NOW + 16 * 60 * 1000 : NOW),
+    fetch: async (url, options) => {
+      const text = String(url);
+      if (text.startsWith(mock.baseUrl)) return await fetch(url, options);
+      if (text.includes("/token?")) {
+        return { status: 200, ok: true, headers: new Headers(), text: async () => JSON.stringify({ token: "registry-token-not-a-secret" }) };
+      }
+      return {
+        status: 200,
+        ok: true,
+        headers: new Headers(),
+        text: async () => {
+          expired = true;
+          throw new Error("the body read was aborted in this test");
+        },
+      };
+    },
+    issues: [issue(308, [{ report: unitFailed(), dateCreated: "2026-11-20T10:00:00Z" }])],
+  });
+  assert.equal(run.facts.run.status, "partial");
+  assert.equal(run.exitCode, 0);
+  assert.equal(run.facts.held.request_cap, 1);
+  assert.equal(run.facts.held.source_unavailable, 0);
+  assert.deepEqual(run.facts.problems, []);
+});

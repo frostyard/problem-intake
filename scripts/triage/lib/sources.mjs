@@ -310,6 +310,8 @@ export function createSources({ config, stateDir, runGit, fetchImpl = globalThis
     try {
       body = JSON.parse(await response.text());
     } catch {
+      // A body that the deadline cut is a deadline stop.
+      stopIfExpired();
       throw new SourceError("registry");
     }
     if (body === null || typeof body !== "object" || !Array.isArray(body.tags)) {
@@ -368,6 +370,7 @@ export function createSources({ config, stateDir, runGit, fetchImpl = globalThis
     } catch (error) {
       // The deadline is not a fact about the source: it is not kept.
       if (error instanceof CapError) throw error;
+      stopIfExpired();
       const wrapped = error instanceof SourceError ? error : new SourceError("registry");
       imageTagLists.set(image, { ok: false, error: wrapped });
       throw wrapped;
@@ -408,6 +411,7 @@ export function createSources({ config, stateDir, runGit, fetchImpl = globalThis
       return names;
     } catch (error) {
       if (error instanceof CapError) throw error;
+      stopIfExpired();
       const wrapped = error instanceof SourceError ? error : new SourceError("index");
       indexLists.set(feature, { ok: false, error: wrapped });
       throw wrapped;

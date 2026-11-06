@@ -765,7 +765,9 @@ export async function runReader(options = {}) {
         checkDeadline();
         if (pending !== null) problems.push(pending);
       } catch (error) {
-        if (error instanceof CapError) {
+        // Past the deadline every stop of a key's checks is a deadline stop,
+        // whatever error the read gave: the run is partial, never ok.
+        if (error instanceof CapError || (error instanceof SourceError && clock() >= deadline)) {
           // The deadline stopped the checks of this key.
           reason = "request_cap";
           partialRun = true;
