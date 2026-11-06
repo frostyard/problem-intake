@@ -11,6 +11,7 @@ import { readJson, writeFileAtomic, writeJsonAtomic } from "./state.mjs";
 export const HEALTH_SCHEMA = "frostyard.problem-triage-health/1";
 export const HEALTH_FILE = "health.json";
 export const HEARTBEAT_FILE = "heartbeat";
+export const WATCHDOG_FILE = "watchdog";
 export const HEALTH_REPO = "frostyard/problem-intake";
 export const HEALTH_TITLE = "Problem triage health";
 export const LABEL = "problem-report";
@@ -99,6 +100,23 @@ export function writeHeartbeat(dir, day) {
   writeFileAtomic(join(dir, HEARTBEAT_FILE), `${day}\n`);
 }
 
+// The `watchdog` file: the UTC day of the last warning, so 1 outage gets 1
+// comment also when the health issue cannot be read.
+export function readWatchdog(dir) {
+  let text;
+  try {
+    text = readFileSync(join(dir, WATCHDOG_FILE), "utf8");
+  } catch {
+    return null;
+  }
+  const day = text.trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : null;
+}
+
+export function writeWatchdog(dir, day) {
+  writeFileAtomic(join(dir, WATCHDOG_FILE), `${day}\n`);
+}
+
 // The whole days from `from` to `to`, both `YYYY-MM-DD`.
 export function daysBetween(from, to) {
   const start = Date.parse(`${from}T00:00:00Z`);
@@ -134,11 +152,25 @@ export async function createComment(github, repo, number, body) {
 // The machine account of the job.
 export const MACHINE = "frostyard-machines";
 
-// The comments of an issue from `since` on (an ISO instant). GitHub returns
-// the newest pages first without `since`, so the job always asks with it.
-export async function commentsSince(github, number, since) {
-  const list = await github.api(`repos/${HEALTH_REPO}/issues/${number}/comments?since=${since}&per_page=100`);
-  return Array.isArray(list) ? list.filter((comment) => comment !== null && typeof comment === "object") : [];
+// The comments of an issue from `since` on (an ISO instant), read page by page
+// until a short page. Returns the list, or null when the read is incomplete
+// (the page cap was reached, or the gate stopped it).
+export const COMMENT_PAGES = 10;
+const COMMENT_PAGE_SIZE = 100;
+
+export async function commentsSince(github, number, since, { pages = COMMENT_PAGES, gate = null } = {}) {
+  const all = [];
+  for (let page = 1; page <= pages; page += 1) {
+    if (gate !== null && !gate()) return null;
+    const tail = since === null ? "" : `&since=${since}`;
+    const list = await github.api(
+      `repos/${HEALTH_REPO}/issues/${number}/comments?per_page=${COMMENT_PAGE_SIZE}${tail}&page=${page}`,
+    );
+    const items = Array.isArray(list) ? list.filter((comment) => comment !== null && typeof comment === "object") : [];
+    all.push(...items);
+    if (items.length < COMMENT_PAGE_SIZE) return all;
+  }
+  return null;
 }
 
 // True when the machine account wrote a comment with exactly this text.

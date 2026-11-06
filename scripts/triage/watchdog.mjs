@@ -38,6 +38,12 @@ export async function main({ now = new Date(), env = process.env } = {}) {
   const age = heartbeat === null ? null : health.daysBetween(heartbeat, today);
   if (age !== null && age <= MAX_DAYS) return 0;
 
+  // 1 warning for each outage: the `watchdog` file holds the day of the last
+  // 1. It suppresses this run when it is after the last completed run, and with
+  // no heartbeat it suppresses every further run.
+  const lastWarning = health.readWatchdog(config.stateDir);
+  if (heartbeat === null ? lastWarning !== null : lastWarning !== null && lastWarning > heartbeat) return 0;
+
   let github;
   try {
     github = createGitHub({ env });
@@ -47,14 +53,21 @@ export async function main({ now = new Date(), env = process.env } = {}) {
       diagnostic("health_issue_missing");
       return 0;
     }
-    // 1 comment for each outage. GitHub returns the newest pages first without
-    // `since`, so the read starts at the day after the last completed run (or 3
-    // days back with no heartbeat), and an existing warning of that window is
-    // not repeated.
-    const since = heartbeat === null ? health.dayShift(today, -3) : health.dayShift(heartbeat, 1);
-    const comments = await health.commentsSince(github, issue.number, `${since}T00:00:00Z`);
-    if (health.hasMachineComment(comments, health.WATCHDOG_TEXT)) return 0;
+    // The crash guard: a warning of this outage on the issue is not repeated.
+    // The read starts at the day after the last completed run, or at the last
+    // warning with no heartbeat (and from the beginning with neither).
+    let since = null;
+    if (heartbeat !== null) since = `${health.dayShift(heartbeat, 1)}T00:00:00Z`;
+    else if (lastWarning !== null) since = `${lastWarning}T00:00:00Z`;
+    const comments = await health.commentsSince(github, issue.number, since);
+    // An incomplete read cannot say that the warning is missing: none is sent.
+    if (comments === null) return 0;
+    if (health.hasMachineComment(comments, health.WATCHDOG_TEXT)) {
+      health.writeWatchdog(config.stateDir, today);
+      return 0;
+    }
     await health.createComment(github, health.HEALTH_REPO, issue.number, health.WATCHDOG_TEXT);
+    health.writeWatchdog(config.stateDir, today);
     return 0;
   } catch (error) {
     diagnostic(error instanceof GitHubError ? `github:${error.code}` : "run_failed");

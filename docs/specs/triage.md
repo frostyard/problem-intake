@@ -67,6 +67,7 @@ The state folder is `~/.local/state/problem-triage/`, mode `0700`, owner
 | `published.json` | `0600` | 1 entry for each tracked problem key ([Close the loop](#close-the-loop)) |
 | `health.json` | `0600` | the last 7 runs (`day`, `run.status`, `notes`, the held counts, the deferred counts by reason, `rotation_due`), `last_read` (GlitchTip issue id to the day the reader last read it) and `issue_keys` (GlitchTip issue id to problem key, for each issue whose key the reader learned from its first event page; ids and keys only, no report value) |
 | `heartbeat` | `0600` | the day (`YYYY-MM-DD`) of the last run whose publisher ended |
+| `watchdog` | `0600` | the day (`YYYY-MM-DD`) of the last watchdog warning; a warning is written once for each outage |
 | `cache/` | `0700` | `git/<owner>__<repo>` clones of the routed repositories, and the registry and index answers of the run |
 
 `facts.json` is written through a temporary file in the same folder, then
@@ -703,13 +704,19 @@ existing `gh` sign-in.
   count. The publisher sets its body each run (an unchanged body is not sent
   again), and adds a comment only when `run.status` turns from `ok` to another
   value, and once when token rotation turns due (token day 335), with the fixed text "The GlitchTip read token is
-  due for rotation." A run that never completes is the watchdog's comment, not
-  the publisher's.
+  due for rotation." Before such a comment it reads the health issue comments
+  since the day of the previous run, so a crash after the comment sends no
+  second 1. A run that never completes is the watchdog's comment, not the
+  publisher's.
 - **Watchdog.** `scripts/triage/watchdog.mjs` runs at 12:00
   America/New_York. When `heartbeat` is missing or older than 2 days, it adds
   1 comment to the health issue: "The triage job has not completed a run in the
   last 2 days." Operational text only. It runs also when the main timer never
-  started.
+  started. It warns once for each outage: the state file `watchdog` holds the
+  day of its last warning, and a warning that is newer than `heartbeat` (or
+  any warning, while `heartbeat` is missing) stops the next 1. It also reads
+  the health issue comments since the outage began, so a crash after the
+  comment sends no second 1.
 
 ## Close the loop
 
@@ -749,6 +756,12 @@ truth. So an action whose state write was lost is not repeated. The tests
 cover a crash after the issue create, after a comment and after a reopen.
 
 When `published.json` is lost (a rebuild of the team VM), the publisher
+finds its issues with the search API (`search/issues`, 100 for each page, each
+page 1 call). When the search holds more than 1000 issues, or a page fails, the
+rebuild is incomplete: the publisher writes no `published.json`, does no loop
+step, files no issue, and writes the health issue; the next run tries again. A
+read that stops at a page cap (comments, releases) is incomplete too: that key
+waits, with no action and no state change. The publisher
 restores `repo`, `number`, `cycle`, `state` and `boundary` from its markers,
 and it repeats no GitHub action. It restores `released_day` from the same
 public source as at the release step:
@@ -788,6 +801,11 @@ again from the recovery day.
      `org.opencontainers.image.created` is after the close time. `released_day`
      is the latest of their `created` days. The boundary is the list of
      `image:<id>:<version>`.
+   - With a closer, no date filters the deliveries: the publisher finds the
+     oldest containing delivery by binary search over the releases (by publish
+     time) or the image tags (numeric), 1 compare for each probe. It assumes
+     that containment is monotonic in that order: a later delivery of the
+     default branch holds every earlier fix.
    - `sysext_update_failed`, or an issue transferred to another repository: the
      publisher cannot map a fix to a delivery by itself, so the owner adds 1
      comment line, `Fixed in: image <id> <14 digits>` (1 line for each image) or

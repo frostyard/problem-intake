@@ -4,7 +4,7 @@
 // state file, and each test passes `now`. Image labels and the sysext index
 // come from a temporary TRIAGE_SOURCES folder.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
@@ -1234,7 +1234,12 @@ test("a repository without the label defers the problem and creates no label", a
 
   assert.equal(await run(world), 0);
   assert.deepEqual(issuePosts(world), []);
-  assert.deepEqual(calls(world, "repos/frostyard/snosi/labels"), []);
+  // The label is read once and never created.
+  assert.equal(calls(world, "repos/frostyard/snosi/labels").length, 1);
+  assert.deepEqual(
+    ghState(world).calls.filter((call) => call[0] === "api" && String(call[1]).includes("/labels") && call.includes("POST")),
+    [],
+  );
   assert.deepEqual(commentPosts(world), []);
   const health = readHealth(world);
   assert.equal(health.runs.at(-1).deferred.no_label, 1);
@@ -1879,26 +1884,39 @@ test("a failed regressed comment changes no state and repeats no cycle", async (
 
 test("compare calls that pass the soft limit still leave the health issue", async () => {
   const world = makeWorld({ labels: { "frostyard/chairlift": ["problem-report"] } });
-  const problem = appProblem();
-  setupTracked(world, problem, {
-    repo: "frostyard/chairlift",
-    closed: true,
-    stateReason: "COMPLETED",
-    closedAt: "2026-11-20T00:00:00Z",
-    closer: { type: "PullRequest", sha: "fix1" },
-  });
-  // 20 releases, none of which contains the fix: 1 compare call each.
+  // 20 merged keys of 1 repository, and 40 releases that no 1 of contains: the
+  // binary search of each key spends compare calls until the soft limit stops
+  // the loop work.
+  const entries = {};
+  for (let i = 1; i <= 20; i += 1) {
+    const key = keyOf(i);
+    const problem = appProblem({ key, observations: [observation({ image: "snow", version: `0.${i}.0` })] });
+    const built = issueFor(problem);
+    const marker = markerOf({ key, cycle: 1, step: "filed" });
+    addIssue(world, "frostyard/chairlift", {
+      number: i,
+      title: built.title,
+      body: built.body,
+      state: "closed",
+      stateReason: "COMPLETED",
+      closedAt: "2026-11-20T00:00:00Z",
+      closer: { type: "PullRequest", sha: `fix${i}` },
+      comments: [{ author: "frostyard-machines", association: "MEMBER", body: marker, createdAt: "2026-11-19T00:00:00Z" }],
+    });
+    entries[key] = issueEntry({ repo: "frostyard/chairlift", number: i, marker });
+  }
+  writePublishedFile(world, publishedDoc(entries));
   setRelease(
     world,
     "frostyard/chairlift",
-    Array.from({ length: 20 }, (_, i) => ({
+    Array.from({ length: 40 }, (_, i) => ({
       tag_name: `v1.${i}.0`,
-      published_at: `2026-11-20T${String(i % 24).padStart(2, "0")}:00:00Z`,
+      published_at: new Date(Date.parse("2026-12-31T12:00:00Z") - i * 3_600_000).toISOString(),
       draft: false,
       prerelease: false,
     })),
   );
-  writeFacts(world, factsDoc({ problems: [], watched: [{ key: KEY, coverage: "complete" }] }));
+  writeFacts(world, factsDoc({ problems: [] }));
 
   assert.equal(await run(world, { hooks: { limit: 20 } }), 0);
   const entry = readHealth(world).runs.at(-1);
@@ -2203,14 +2221,26 @@ test("a marker older than the last 100 comments is still read", async () => {
   assert.deepEqual(commentPosts(world), []);
 });
 
-test("the rebuild search asks for every job issue of the organization", async () => {
+test("the rebuild reads the search/issues pages, 1 counted call for each", async () => {
   const world = makeWorld({ labels: { "frostyard/snosi": ["problem-report"] } });
+  // 250 job issues: 3 pages of 100, 100 and 50.
+  for (let i = 1; i <= 250; i += 1) {
+    const problem = unitProblem({ key: keyOf(i), unit: `unit-${i}.service` });
+    const built = issueFor(problem);
+    addIssue(world, "frostyard/snosi", { number: i, title: built.title, body: built.body, comments: [filedComment(keyOf(i))] });
+  }
   writeFacts(world, factsDoc({}));
 
   assert.equal(await run(world), 0);
-  const rebuild = calls(world, "Problem key:").filter((call) => call[0] === "search");
-  assert.equal(rebuild.length, 1);
-  assert.equal(rebuild[0][rebuild[0].indexOf("--limit") + 1], "1000");
+  const pages = calls(world, "search/issues");
+  assert.equal(pages.length, 3);
+  pages.forEach((call, i) => {
+    const text = call.join(" ");
+    assert.ok(text.includes(`page=${i + 1}`), text);
+    assert.ok(text.includes("per_page=100"), text);
+    assert.ok(text.includes("org:frostyard author:frostyard-machines label:problem-report is:issue"), text);
+  });
+  assert.equal(Object.keys(readPublished(world).keys).length, 250);
 });
 
 test("a release far back is found by reading every page", async () => {
@@ -2232,13 +2262,15 @@ test("a release far back is found by reading every page", async () => {
     prerelease: false,
   }));
   setRelease(world, "frostyard/chairlift", releases);
-  setCompare(world, "frostyard/chairlift", { "fix1...v1.149.0": "ahead" });
+  // Containment is monotonic: the newest release holds the fix, and every
+  // release before it does not (index 0 of the array is the newest).
+  setCompare(world, "frostyard/chairlift", { "fix1...v1.0.0": "ahead" });
   writeFacts(world, factsDoc({ problems: [] }));
 
   assert.equal(await run(world), 0);
   const published = readPublished(world);
   assert.equal(published.keys[KEY].state, "released");
-  assert.equal(published.keys[KEY].boundary, "app:1.149.0");
+  assert.equal(published.keys[KEY].boundary, "app:1.0.0");
   assert.equal(calls(world, "releases?per_page=100&page=2").length, 1);
 });
 
@@ -2334,8 +2366,8 @@ test("the run has 10 comments or reopens in all, the filed markers included", as
 });
 
 test("a fix that shipped before the issue closed is released at the closer date", async () => {
-  // App: the fix commit is from 2026-11-10, the release from 2026-11-12, and
-  // the issue closed on 2026-11-20.
+  // App: the release is from 2026-11-12 and the issue closed on 2026-11-20, so
+  // a close-time filter would miss it, but its tag holds the fix.
   const app = makeWorld({ labels: { "frostyard/chairlift": ["problem-report"] } });
   const problem = appProblem();
   setupTracked(app, problem, {
@@ -2347,9 +2379,6 @@ test("a fix that shipped before the issue closed is released at the closer date"
   });
   setRelease(app, "frostyard/chairlift", [{ tag_name: "v0.15.0", published_at: "2026-11-12T09:00:00Z", draft: false, prerelease: false }]);
   setCompare(app, "frostyard/chairlift", { "fix1...v0.15.0": "ahead" });
-  const appState = ghState(app);
-  appState.repos["frostyard/chairlift"].commits = { fix1: "2026-11-10T09:00:00Z" };
-  writeGh(app, appState);
   writeFacts(app, factsDoc({ problems: [] }));
   assert.equal(await run(app), 0);
   assert.equal(readPublished(app).keys[KEY].state, "released");
@@ -2369,7 +2398,6 @@ test("a fix that shipped before the issue closed is released at the closer date"
     labels: { "20261112093000": imageLabels("2".repeat(40), "2026-11-12T09:30:00Z") },
   });
   const imageState = ghState(image);
-  imageState.repos["frostyard/snosi"].commits = { fix1: "2026-11-10T09:00:00Z" };
   imageState.repos["frostyard/snosi"].compare = { [`fix1...${"2".repeat(40)}`]: "identical" };
   writeGh(image, imageState);
   writeFacts(image, factsDoc({ problems: [] }));
@@ -2420,4 +2448,243 @@ test("a health comment of the day is written once, also after a crash", async ()
   assert.equal(await run(rotation), 0);
   assert.equal(commentPosts(rotation).length, 0);
   assert.equal(commentBodies(rotation, "frostyard/problem-intake", 1).length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// The blocking points of re-review 1
+// ---------------------------------------------------------------------------
+
+test("an incomplete rebuild writes no state and files nothing", async () => {
+  const world = makeWorld({ labels: { "frostyard/snosi": ["problem-report"] } });
+  const problem = unitProblem();
+  const built = issueFor(problem);
+  addIssue(world, "frostyard/snosi", { number: 1, title: built.title, body: built.body, comments: [filedComment(KEY)] });
+  // GitHub reports more hits than its 1000 hit cap can return.
+  const state = ghState(world);
+  state.searchTotalCount = 1200;
+  writeGh(world, state);
+  writeFacts(world, factsDoc({ problems: [unitProblem({ key: keyOf(9), unit: "other.service" })] }));
+
+  assert.equal(await run(world), 0);
+  assert.equal(existsSync(join(world.stateDir, "published.json")), false);
+  assert.deepEqual(issuePosts(world), []);
+  assert.deepEqual(statePatches(world), []);
+  assert.deepEqual(calls(world, "graphql"), []);
+  const entry = readHealth(world).runs.at(-1);
+  assert.equal(entry.deferred.recovery, 1);
+  assert.equal(ghState(world).repos["frostyard/problem-intake"].issues.length, 1);
+  assert.equal(readHeartbeat(world), DAY);
+});
+
+test("a marker read that the page cap cuts takes no action", async () => {
+  const world = makeWorld({ labels: { "frostyard/snosi": ["problem-report"] } });
+  const problem = unitProblem();
+  const built = issueFor(problem);
+  const comments = [
+    filedComment(KEY),
+    {
+      author: "frostyard-machines",
+      association: "MEMBER",
+      body: markerOf({ key: KEY, cycle: 1, step: "released", boundary: "image:snow:20261120113000" }),
+      createdAt: "2026-11-19T00:00:00Z",
+    },
+  ];
+  for (let i = 0; i < 250; i += 1) {
+    comments.push({ author: "a-drive-by", association: "NONE", body: `chatter ${i}`, createdAt: "2026-11-20T00:00:00Z" });
+  }
+  addIssue(world, "frostyard/snosi", { number: 1, title: built.title, body: built.body, comments });
+  setRegistry(world, "snow", { tags: ["20261120113000"], labels: { "20261120113000": imageLabels("1".repeat(40), "2026-11-20T11:30:00Z") } });
+  writePublishedFile(world, publishedDoc({ [KEY]: issueEntry({ number: 1, marker: markerOf({ key: KEY, cycle: 1, step: "filed" }) }) }));
+  writeFacts(world, factsDoc({ problems: [], watched: [{ key: KEY, coverage: "complete" }] }));
+
+  assert.equal(await run(world, { hooks: { commentPages: 1 } }), 0);
+  assert.deepEqual(commentPosts(world), []);
+  const published = readPublished(world);
+  assert.equal(published.keys[KEY].state, "filed");
+  assert.equal(published.keys[KEY].released_day, null);
+  assert.equal(readHealth(world).runs.at(-1).deferred.recovery, 1);
+});
+
+test("a release read that the page cap cuts keeps the key merged", async () => {
+  const world = makeWorld({ labels: { "frostyard/chairlift": ["problem-report"] } });
+  const problem = appProblem();
+  setupTracked(world, problem, {
+    repo: "frostyard/chairlift",
+    closed: true,
+    stateReason: "COMPLETED",
+    closedAt: "2026-11-20T00:00:00Z",
+    closer: { type: "PullRequest", sha: "fix1" },
+  });
+  // Exactly 1 full page: more releases may hold the fix.
+  setRelease(
+    world,
+    "frostyard/chairlift",
+    Array.from({ length: 100 }, (_, i) => ({
+      tag_name: `v1.${i}.0`,
+      published_at: new Date(Date.parse("2026-12-31T12:00:00Z") - i * 3_600_000).toISOString(),
+      draft: false,
+      prerelease: false,
+    })),
+  );
+  writeFacts(world, factsDoc({ problems: [] }));
+
+  assert.equal(await run(world, { hooks: { releasePages: 1 } }), 0);
+  assert.deepEqual(commentPosts(world), []);
+  assert.equal(readPublished(world).keys[KEY].state, "merged");
+  assert.equal(readHealth(world).runs.at(-1).deferred.recovery > 0, true);
+});
+
+test("a close in the same second as the regressed marker is a pending reopen", async () => {
+  const world = makeWorld({ labels: { "frostyard/chairlift": ["problem-report"] } });
+  const problem = appProblem();
+  const { number } = setupTracked(world, problem, {
+    repo: "frostyard/chairlift",
+    cycle: 2,
+    step: "regressed",
+    boundary: null,
+    state: "filed",
+    closed: true,
+    stateReason: "COMPLETED",
+    closedAt: "2026-11-19T00:00:00Z",
+  });
+  writeFacts(world, factsDoc({ problems: [], watched: [{ key: KEY, coverage: "complete" }] }));
+
+  assert.equal(await run(world), 0);
+  assert.equal(statePatches(world).length, 1);
+  assert.equal(issues(world, "frostyard/chairlift")[0].state, "open");
+  assert.deepEqual(commentPosts(world), []);
+  assert.equal(readPublished(world).keys[KEY].cycle, 2);
+  assert.equal(readPublished(world).keys[KEY].state, "filed");
+  assert.equal(commentBodies(world, "frostyard/chairlift", number).length, 1);
+});
+
+test("the oldest release that holds the fix costs at most 7 compares", async () => {
+  const world = makeWorld({ labels: { "frostyard/chairlift": ["problem-report"] } });
+  const problem = appProblem();
+  setupTracked(world, problem, {
+    repo: "frostyard/chairlift",
+    closed: true,
+    stateReason: "COMPLETED",
+    closedAt: "2026-11-20T00:00:00Z",
+    closer: { type: "PullRequest", sha: "fix1" },
+  });
+  // 40 releases, newest first: the newest 5 hold the fix, so the oldest 1 that
+  // holds it is v1.4.0.
+  setRelease(
+    world,
+    "frostyard/chairlift",
+    Array.from({ length: 40 }, (_, i) => ({
+      tag_name: `v1.${i}.0`,
+      published_at: new Date(Date.parse("2026-12-31T12:00:00Z") - i * 3_600_000).toISOString(),
+      draft: false,
+      prerelease: false,
+    })),
+  );
+  setCompare(world, "frostyard/chairlift", {
+    "fix1...v1.0.0": "ahead",
+    "fix1...v1.1.0": "ahead",
+    "fix1...v1.2.0": "ahead",
+    "fix1...v1.3.0": "ahead",
+    "fix1...v1.4.0": "identical",
+  });
+  writeFacts(world, factsDoc({ problems: [] }));
+
+  assert.equal(await run(world), 0);
+  assert.equal(readPublished(world).keys[KEY].state, "released");
+  assert.equal(readPublished(world).keys[KEY].boundary, "app:1.4.0");
+  assert.equal(calls(world, "/compare/").length <= 7, true);
+});
+
+test("a health comment is not repeated by a run on the next day", async () => {
+  const world = makeWorld({ labels: {} });
+  writeHealthFile(world, {
+    schema: "frostyard.problem-triage-health/1",
+    runs: [{ day: "2026-11-20", status: "ok", notes: [], held: {}, deferred: {}, rotation_due: false }],
+    last_read: {},
+    issue_keys: {},
+  });
+  writeFacts(world, factsDoc({ status: "auth" }));
+  const crash = {
+    afterAction(name) {
+      if (name === "health-comment") throw new Error("crash after the status comment");
+    },
+  };
+  assert.equal(await run(world, { hooks: crash }), 1);
+  assert.equal(commentPosts(world).length, 1);
+
+  resetCalls(world);
+  writeFacts(world, factsDoc({ day: "2026-11-22", status: "auth" }));
+  assert.equal(await run(world, { now: "2026-11-22T06:15:00Z" }), 0);
+  assert.equal(commentPosts(world).length, 0);
+  assert.equal(commentBodies(world, "frostyard/problem-intake", 1).length, 1);
+});
+
+test("a health comment after 150 others is still found", async () => {
+  const world = makeWorld({ labels: {} });
+  const comments = [];
+  for (let i = 0; i < 150; i += 1) {
+    comments.push({ author: "a-drive-by", association: "NONE", body: `chatter ${i}`, createdAt: "2026-11-20T10:00:00Z" });
+  }
+  comments.push({
+    author: "frostyard-machines",
+    association: "MEMBER",
+    body: "The triage job run status changed from ok to auth.",
+    createdAt: "2026-11-20T12:00:00Z",
+  });
+  addIssue(world, "frostyard/problem-intake", {
+    number: 1,
+    title: "Problem triage health",
+    body: "Operational status of the problem-intake triage job.",
+    labels: ["problem-report"],
+    comments,
+  });
+  writeHealthFile(world, {
+    schema: "frostyard.problem-triage-health/1",
+    runs: [{ day: "2026-11-20", status: "ok", notes: [], held: {}, deferred: {}, rotation_due: false }],
+    last_read: {},
+    issue_keys: {},
+  });
+  writeFacts(world, factsDoc({ status: "auth" }));
+
+  assert.equal(await run(world), 0);
+  assert.equal(commentPosts(world).length, 0);
+  assert.equal(commentBodies(world, "frostyard/problem-intake", 1).length, 151);
+  // The read went to the second page, and it was complete.
+  assert.equal(calls(world, "issues/1/comments").length, 2);
+  assert.equal(readHealth(world).runs.at(-1).deferred.recovery, 0);
+});
+
+test("the deadline stops the release search between 2 pages", async () => {
+  const world = makeWorld({ labels: { "frostyard/chairlift": ["problem-report"] } });
+  const problem = appProblem();
+  setupTracked(world, problem, {
+    repo: "frostyard/chairlift",
+    closed: true,
+    stateReason: "COMPLETED",
+    closedAt: "2026-11-20T00:00:00Z",
+    closer: { type: "PullRequest", sha: "fix1" },
+  });
+  setRelease(
+    world,
+    "frostyard/chairlift",
+    Array.from({ length: 150 }, (_, i) => ({
+      tag_name: `v1.${i}.0`,
+      published_at: new Date(Date.parse("2026-12-31T12:00:00Z") - i * 3_600_000).toISOString(),
+      draft: false,
+      prerelease: false,
+    })),
+  );
+  writeFacts(world, factsDoc({ problems: [] }));
+  let reads = 0;
+  const clock = () => {
+    reads += 1;
+    // The run starts at 0; from the 5th reading on, the deadline has passed.
+    return reads <= 4 ? 0 : 11 * 60 * 1000;
+  };
+
+  assert.equal(await run(world, { hooks: { clock } }), 0);
+  assert.equal(calls(world, "releases?per_page=100&page=2").length, 0);
+  assert.equal(readHealth(world).runs.at(-1).deferred.deadline > 0, true);
+  assert.equal(ghState(world).repos["frostyard/problem-intake"].issues.length, 1);
+  assert.equal(readHeartbeat(world), DAY);
 });

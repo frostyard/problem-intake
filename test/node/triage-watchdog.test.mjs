@@ -56,6 +56,12 @@ function makeWorld({ heartbeat = null, healthIssue = true, comments = [] } = {})
   return { dir, stateDir, ghStatePath, env };
 }
 
+function resetCalls(world) {
+  const state = ghState(world);
+  state.calls = [];
+  writeFileSync(world.ghStatePath, `${JSON.stringify(state, null, 2)}\n`);
+}
+
 function ghState(world) {
   return JSON.parse(readFileSync(world.ghStatePath, "utf8"));
 }
@@ -147,5 +153,31 @@ test("each outage gets 1 warning, and no warning is repeated", async () => {
   // And it is not repeated either.
   setNow(world, "2026-11-26T18:00:00Z");
   assert.equal(await run(world, "2026-11-26T12:00:00Z"), 0);
+  assert.equal(comments(world).length, 2);
+});
+
+test("6 runs with no heartbeat give 1 warning, and a new outage 1 more", async () => {
+  const world = makeWorld();
+
+  // No heartbeat for 6 days: the first run warns, the other 5 do not, and they
+  // make no request at all (the `watchdog` file decides before any read).
+  for (let i = 0; i < 6; i += 1) {
+    const day = `2026-11-${21 + i}`;
+    setNow(world, `${day}T12:00:00Z`);
+    resetCalls(world);
+    assert.equal(await run(world, `${day}T12:00:00Z`), 0);
+    assert.equal(comments(world).length, 1);
+    if (i > 0) assert.deepEqual(ghState(world).calls, [], `run ${i + 1} made a request`);
+  }
+
+  // The job runs again, and then stops: a new outage gets 1 more warning.
+  setHeartbeat(world, "2026-11-27");
+  setNow(world, "2026-12-01T12:00:00Z");
+  assert.equal(await run(world, "2026-12-01T12:00:00Z"), 0);
+  assert.equal(comments(world).length, 2);
+
+  // And the next run of that outage adds none.
+  setNow(world, "2026-12-01T18:00:00Z");
+  assert.equal(await run(world, "2026-12-01T12:00:00Z"), 0);
   assert.equal(comments(world).length, 2);
 });

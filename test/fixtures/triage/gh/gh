@@ -5,7 +5,7 @@
 // file holds every issue, comment, release, label and compare answer.
 //
 // Paths: `api repos/...`, `api graphql`, and `search issues`.
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, writeSync } from "node:fs";
 
 const statePath = process.env.FAKE_GH_STATE;
 if (!statePath) {
@@ -21,13 +21,22 @@ function save(state) {
   writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
 }
 
+// A large answer must reach the pipe before the process ends: a buffered
+// stdout write is lost by process.exit(), so every write here is synchronous.
+function writeAll(fd, text) {
+  let offset = 0;
+  while (offset < text.length) offset += writeSync(fd, text.slice(offset));
+}
+
 function answer(value) {
-  process.stdout.write(JSON.stringify(value === undefined ? null : value));
+  writeAll(1, JSON.stringify(value === undefined ? null : value));
   process.exit(0);
 }
 
 function fail(status, text) {
-  process.stderr.write(`gh: ${text} (HTTP ${status})\n`);
+  // The call log holds a failed call too: a test counts every request.
+  save(state);
+  writeAll(2, `gh: ${text} (HTTP ${status})\n`);
   process.exit(1);
 }
 
@@ -216,9 +225,39 @@ if (path === "graphql") {
   save(state);
   if (errors.length === 0) answer({ data: { repository } });
   // `gh` prints the JSON on stdout and exits 1 when the answer holds errors.
-  process.stdout.write(JSON.stringify({ data: { repository }, errors }));
-  process.stderr.write("gh: Could not resolve to an Issue\n");
+  save(state);
+  writeAll(1, JSON.stringify({ data: { repository }, errors }));
+  writeAll(2, "gh: Could not resolve to an Issue\n");
   process.exit(1);
+}
+
+// search/issues: the paged API of the rebuild, 1 page for each request.
+if (path === "search/issues") {
+  const field = (name) => {
+    const hit = fields.find((item) => item.startsWith(`${name}=`));
+    return hit === undefined ? null : hit.slice(name.length + 1);
+  };
+  const perPage = Number(field("per_page") ?? "30");
+  const page = Number(field("page") ?? "1");
+  const wanted = /Problem key: ([0-9a-f]{16})/.exec(field("q") ?? "");
+  const hits = [];
+  for (const [id, repo] of Object.entries(state.repos ?? {})) {
+    for (const issue of repo.issues ?? []) {
+      if ((issue.author ?? "frostyard-machines") !== "frostyard-machines") continue;
+      if (!(issue.labels ?? ["problem-report"]).includes("problem-report")) continue;
+      const body = issue.body ?? "";
+      if (wanted === null) {
+        if (!/Problem key: [0-9a-f]{16}/.test(body)) continue;
+      } else if (!body.includes(`Problem key: ${wanted[1]}`)) continue;
+      hits.push({ repository: { full_name: id }, number: issue.number, title: issue.title ?? "", body, state: issue.state ?? "open" });
+    }
+  }
+  const size = Number.isSafeInteger(perPage) && perPage > 0 ? perPage : 30;
+  save(state);
+  answer({
+    total_count: Number.isSafeInteger(state.searchTotalCount) ? state.searchTotalCount : hits.length,
+    items: hits.slice((page - 1) * size, page * size),
+  });
 }
 
 const [pathname, search] = path.split("?");
@@ -284,13 +323,6 @@ if (rest[0] === "releases" && rest.length === 1) {
   answer(all.slice((page - 1) * perPage, page * perPage));
 }
 
-if (rest[0] === "commits" && rest.length === 2) {
-  const commits = (state.repos ?? {})[id]?.commits ?? {};
-  if (!Object.hasOwn(commits, rest[1])) fail(404, "Not Found");
-  save(state);
-  answer({ sha: rest[1], commit: { committer: { date: commits[rest[1]] } } });
-}
-
 if (rest[0] === "compare" && rest.length === 2) {
   const compare = (state.repos ?? {})[id]?.compare ?? {};
   if (!Object.hasOwn(compare, rest[1])) fail(404, "Not Found");
@@ -337,18 +369,23 @@ if (rest[0] === "issues" && rest.length >= 2) {
       save(state);
       answer({ id: issue.comments.length, body: comment.body });
     }
-    // `since` keeps the comments of that instant on, as GitHub does.
+    // `since` keeps the comments of that instant on, and the list is paged
+    // oldest first, as GitHub answers it.
     const since = params.get("since");
+    const matching = issue.comments.filter(
+      (comment) => since === null || Date.parse(comment.createdAt ?? NOW) >= Date.parse(since),
+    );
+    const perPage = Number(params.get("per_page") ?? "30");
+    const page = Number(params.get("page") ?? "1");
+    const size = Number.isSafeInteger(perPage) && perPage > 0 ? perPage : 30;
     save(state);
     answer(
-      issue.comments
-        .filter((comment) => since === null || Date.parse(comment.createdAt ?? NOW) >= Date.parse(since))
-        .map((comment) => ({
-          author: { login: comment.author ?? "frostyard-machines" },
-          authorAssociation: comment.association ?? "MEMBER",
-          body: comment.body ?? "",
-          createdAt: comment.createdAt ?? NOW,
-        })),
+      matching.slice((page - 1) * size, page * size).map((comment) => ({
+        author: { login: comment.author ?? "frostyard-machines" },
+        authorAssociation: comment.association ?? "MEMBER",
+        body: comment.body ?? "",
+        createdAt: comment.createdAt ?? NOW,
+      })),
     );
   }
 }

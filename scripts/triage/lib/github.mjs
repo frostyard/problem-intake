@@ -27,6 +27,11 @@ export class GitHubError extends Error {
 }
 
 const MAX_BUFFER = 32 * 1024 * 1024;
+const MAX_CALL_MS = 60_000;
+const MIN_CALL_MS = 1_000;
+const HEALTH_RESERVE_MS = 60_000;
+const SEARCH_PER_PAGE = 100;
+const SEARCH_MAX_TOTAL = 1000;
 
 function parseOutput(text, code) {
   const trimmed = String(text ?? "").trim();
@@ -56,9 +61,17 @@ function failedStdout(error) {
 // 2 limits: `softLimit` stops the loop work and throws BudgetError, so that the
 // reserved calls stay for the health issue; `limit` is the hard limit of the
 // run. raiseBudget() lifts the soft limit to the hard 1 for the health issue.
-export function createGitHub({ env = process.env, limit = 150, softLimit = limit } = {}) {
+export function createGitHub({ env = process.env, limit = 150, softLimit = limit, clock = null, deadlineAt = null } = {}) {
   let count = 0;
   let soft = Math.max(0, Math.min(softLimit, limit));
+
+  // The time a call may take: at most 60 seconds, and no longer than the time
+  // left to the deadline plus the 60 second reserve of the health issue.
+  function callTimeout() {
+    if (deadlineAt === null) return MAX_CALL_MS;
+    const left = deadlineAt - (clock === null ? Date.now() : clock()) + HEALTH_RESERVE_MS;
+    return Math.max(MIN_CALL_MS, Math.min(MAX_CALL_MS, left));
+  }
 
   function spawnCall(args, input) {
     if (count >= soft) throw new BudgetError();
@@ -70,8 +83,10 @@ export function createGitHub({ env = process.env, limit = 150, softLimit = limit
         encoding: "utf8",
         stdio: ["pipe", "pipe", "pipe"],
         maxBuffer: MAX_BUFFER,
+        timeout: callTimeout(),
       });
     } catch (error) {
+      if (error?.signal !== undefined && error?.signal !== null) throw new GitHubError("timeout");
       const stderr = String(error?.stderr ?? "");
       const match = /HTTP ([0-9]{3})/.exec(stderr);
       if (match !== null) throw new GitHubError("http", Number(match[1]));
@@ -87,9 +102,12 @@ export function createGitHub({ env = process.env, limit = 150, softLimit = limit
 
   // `gh api <path> --method <M>`, with the JSON body on stdin. Returns the
   // parsed answer, or null for an empty answer.
-  function api(path, { method = "GET", body } = {}) {
+  function api(path, { method = "GET", body, fields } = {}) {
     const args = ["api", path, "--method", method];
     let input;
+    if (fields !== undefined) {
+      for (const [name, value] of Object.entries(fields)) args.push("-f", `${name}=${value}`);
+    }
     if (body !== undefined) {
       args.push("--input", "-");
       input = JSON.stringify(body);
@@ -142,9 +160,39 @@ export function createGitHub({ env = process.env, limit = 150, softLimit = limit
     return answer;
   }
 
+  // The `search/issues` API, 1 call for each page of 100, until a page holds
+  // fewer than 100. Returns { items, totalCount }, or null when the read is
+  // incomplete (a page beyond GitHub's 1000 hit cap, or a page of 1 call more
+  // than the run may make).
+  function searchIssuePages(query, { maxItems = SEARCH_MAX_TOTAL } = {}) {
+    const items = [];
+    let totalCount = 0;
+    for (let page = 1; ; page += 1) {
+      let answer;
+      try {
+        answer = api("search/issues", {
+          method: "GET",
+          fields: { q: query, per_page: SEARCH_PER_PAGE, page },
+        });
+      } catch (error) {
+        if (error instanceof BudgetError) throw error;
+        return null;
+      }
+      if (answer === null || !Array.isArray(answer.items)) return null;
+      if (page === 1) {
+        totalCount = Number(answer.total_count ?? 0);
+        if (totalCount > maxItems) return null;
+      }
+      items.push(...answer.items);
+      if (answer.items.length < SEARCH_PER_PAGE) break;
+    }
+    return { items, totalCount };
+  }
+
   return {
     api,
     graphql,
+    searchIssuePages,
     searchIssues,
     used: () => count,
     remaining: () => Math.max(0, limit - count),

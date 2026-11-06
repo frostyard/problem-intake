@@ -52,11 +52,34 @@ const SEMVER = /^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})(?
 const DAY = /\d{4}-\d{2}-\d{2}/;
 // The fixed count of the spec's own step text, not a value of a report.
 const FIXED_COUNTS = Object.freeze([`${COVERED_DAYS} covered days`]);
+const REBUILD_QUERY = '"Problem key:" org:frostyard author:frostyard-machines label:problem-report is:issue';
 const RELEASES_PAGE = 100;
 const MAX_RELEASE_PAGES = 50;
 const COMMENTS_PAGE = 100;
 const MAX_COMMENT_PAGES = 20;
 const IMAGE_VERSION = /^[0-9]{14}$/;
+
+// A read that cannot be completed this run: the key waits, with no action.
+class Deferred extends Error {
+  constructor(reason) {
+    super(`deferred: ${reason}`);
+    this.name = "Deferred";
+    this.reason = reason;
+  }
+}
+
+// The oldest index whose probe holds the fix (the probes are monotonic: a
+// later delivery of the branch holds every earlier 1), or null.
+async function firstTrue(count, probe) {
+  let low = 0;
+  let high = count;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (await probe(middle)) high = middle;
+    else low = middle + 1;
+  }
+  return low < count ? low : null;
+}
 
 // A fixed diagnostic line. Never a value of facts, a token or a response body.
 function diagnostic(code) {
@@ -167,6 +190,7 @@ export async function main({ now = new Date(), env = process.env, hooks = {} } =
   }
   const clock = () => (typeof hooks.clock === "function" ? hooks.clock() : Date.now());
   const Budget = Number.isSafeInteger(hooks.limit) ? hooks.limit : CALL_LIMIT;
+  const deadlineAt = clock() + DEADLINE_MS;
   const run = {
     dir: config.stateDir,
     config,
@@ -174,11 +198,13 @@ export async function main({ now = new Date(), env = process.env, hooks = {} } =
     env,
     hooks,
     clock,
-    deadlineAt: clock() + DEADLINE_MS,
+    deadlineAt,
     github: createGitHub({
       env,
       limit: Budget,
       softLimit: Math.max(0, Budget - RESERVE),
+      clock,
+      deadlineAt,
     }),
     sources: createSources({ config }),
     deferred: {},
@@ -186,7 +212,6 @@ export async function main({ now = new Date(), env = process.env, hooks = {} } =
     actions: 0,
     releases: new Map(),
     compares: new Map(),
-    commits: new Map(),
     info: new Map(),
     fresh: new Set(),
     health: health.readHealth(config.stateDir),
@@ -210,7 +235,15 @@ async function publish(run) {
   } catch (error) {
     if (!(error instanceof StateError)) throw error;
   }
-  if (published === null) published = await rebuild(run);
+  if (published === null) {
+    published = await rebuild(run);
+    if (published === null) {
+      // An incomplete rebuild cannot say which keys are tracked: no loop work,
+      // no issue, and no published.json write this run.
+      defer(run, "recovery");
+      return await endRun(run, facts);
+    }
+  }
 
   // The loop work stops at its soft limit and goes on to the health issue:
   // the reserved calls are the health issue's.
@@ -220,7 +253,14 @@ async function publish(run) {
 
   await stopOnBudget(run, () => loop(run, published, facts));
   await stopOnBudget(run, () => fileNew(run, published, facts));
+  writePublished(run.dir, published);
 
+  return await endRun(run, facts);
+}
+
+// The end of every run that did not end in an unexpected error: the health
+// issue, the run entry of health.json and the heartbeat.
+async function endRun(run, facts) {
   run.github.raiseBudget();
   const previous = run.health.runs.at(-1) ?? null;
   const rotationDue =
@@ -244,7 +284,6 @@ async function publish(run) {
 
   run.health.runs.push(entry);
   health.writeHealth(run.dir, run.health);
-  writePublished(run.dir, published);
   health.writeHeartbeat(run.dir, run.today);
   return 0;
 }
@@ -298,13 +337,20 @@ async function syncHealthIssue(run, body, previous, entry) {
   const rotationText = entry.rotation_due === true && previous?.rotation_due !== true ? health.ROTATION_TEXT : null;
   if (statusText === null && rotationText === null) return;
 
-  // A comment of this day is already 1 of these: a rerun writes no second 1.
-  const today = await health.commentsSince(run.github, issue.number, `${run.today}T00:00:00Z`);
-  if (statusText !== null && !health.hasMachineComment(today, statusText)) {
+  // A comment of the previous run's day or later is already 1 of these: a
+  // rerun writes no second 1, also when it runs on the next day.
+  const since = previous === null ? `${run.today}T00:00:00Z` : `${previous.day}T00:00:00Z`;
+  const existing = await health.commentsSince(run.github, issue.number, since, { gate: () => gate(run) });
+  if (existing === null) {
+    // An incomplete read cannot say the comment is missing: none is sent.
+    defer(run, run.stopped ?? "recovery");
+    return;
+  }
+  if (statusText !== null && !health.hasMachineComment(existing, statusText)) {
     await health.createComment(run.github, health.HEALTH_REPO, issue.number, statusText);
     run.hooks.afterAction?.("health-comment");
   }
-  if (rotationText !== null && !health.hasMachineComment(today, rotationText)) {
+  if (rotationText !== null && !health.hasMachineComment(existing, rotationText)) {
     await health.createComment(run.github, health.HEALTH_REPO, issue.number, rotationText);
     run.hooks.afterAction?.("health-rotation");
   }
@@ -313,11 +359,13 @@ async function syncHealthIssue(run, body, previous, entry) {
 // published.json is lost: the state comes back from the job's own issues. The
 // markers of each issue set the cycle, the state and the boundary in sync().
 async function rebuild(run) {
+  const answer = run.github.searchIssuePages(REBUILD_QUERY);
+  // A read that is not complete cannot be the state of the job.
+  if (answer === null) return null;
   const doc = emptyPublished();
-  const hits = await run.github.searchIssues('"Problem key:"', { limit: 1000 });
-  for (const hit of hits ?? []) {
-    const repo = hit?.repository?.nameWithOwner;
-    if (typeof repo !== "string") continue;
+  for (const hit of answer.items) {
+    const repo = typeof hit?.repository?.full_name === "string" ? hit.repository.full_name : null;
+    if (repo === null) continue;
     if (!Number.isSafeInteger(hit?.number)) continue;
     const parsed = parseIssueBody(hit?.body ?? "");
     if (parsed === null) continue;
@@ -397,7 +445,8 @@ async function syncKey(run, published, key, node) {
   let markers = trustedMarkers(comments, key);
   // The bot writes its markers in time order, so the newest trusted marker is
   // the highest. When the last 100 comments hold none, read earlier pages.
-  for (let page = 1; markers.length === 0 && page < MAX_COMMENT_PAGES; page += 1) {
+  const commentPages = Number.isSafeInteger(run.hooks.commentPages) ? run.hooks.commentPages : MAX_COMMENT_PAGES;
+  for (let page = 0; markers.length === 0 && page < commentPages; page += 1) {
     if (pageInfo?.hasPreviousPage !== true || typeof pageInfo?.startCursor !== "string") break;
     if (!gate(run)) {
       // No action and no state change for this key: the next run reads it.
@@ -409,6 +458,12 @@ async function syncKey(run, published, key, node) {
     comments = [...earlier.comments, ...comments];
     markers = trustedMarkers(comments, key);
     pageInfo = earlier.pageInfo;
+  }
+  if (markers.length === 0 && pageInfo?.hasPreviousPage === true) {
+    // The page cap stopped the read before a marker: an incomplete read of the
+    // markers is no record, so the key takes no action and no state change.
+    defer(run, "recovery");
+    return;
   }
   // The markers are the truth: the highest 1 sets the cycle, the boundary and
   // the marker of the entry. A different step (higher or lower) means lost
@@ -442,7 +497,10 @@ async function syncKey(run, published, key, node) {
   run.info.set(key, info);
 
   const step = entry.last_comment_marker === null ? null : parseMarker(entry.last_comment_marker)?.step ?? null;
-  const closedBeforeMarker = info.closedAt !== null && markerAt !== null && Date.parse(info.closedAt) < Date.parse(markerAt);
+  // A tie is a pending reopen too: a new fix close cannot come in the same
+  // second as the job's own comment.
+  const closedBeforeMarker =
+    info.closedAt !== null && markerAt !== null && Date.parse(info.closedAt) <= Date.parse(markerAt);
   info.pendingReopen = step === "regressed" && info.closed && closedBeforeMarker;
   if (info.closed && (info.stateReason === "NOT_PLANNED" || info.stateReason === "DUPLICATE")) {
     entry.state = "muted";
@@ -574,18 +632,28 @@ async function restoreReleased(run, entry) {
       defer(run, "recovery");
       return false;
     }
+    if (error instanceof Deferred) {
+      entry.released_day = null;
+      entry.feature_index = null;
+      defer(run, error.reason);
+      return false;
+    }
     throw error;
   }
 }
 
 async function releasesOf(run, repo) {
   if (run.releases.has(repo)) return run.releases.get(repo);
+  const maxPages = Number.isSafeInteger(run.hooks.releasePages) ? run.hooks.releasePages : MAX_RELEASE_PAGES;
   const all = [];
-  for (let page = 1; page <= MAX_RELEASE_PAGES; page += 1) {
+  for (let page = 1; page <= maxPages; page += 1) {
+    if (!gate(run)) throw new Deferred(run.stopped ?? "deadline");
     const answer = await run.github.api(`repos/${repo}/releases?per_page=${RELEASES_PAGE}&page=${page}`);
     const pageList = Array.isArray(answer) ? answer : [];
     all.push(...pageList);
     if (pageList.length < RELEASES_PAGE) break;
+    // The cap was reached on a full page: more releases may hold the fix.
+    if (page === maxPages) throw new Deferred("recovery");
   }
   const list = all.filter(
     (item) =>
@@ -619,78 +687,69 @@ function containsFix(status) {
   return status === "ahead" || status === "identical";
 }
 
-// The date of the fix commit, read once and cached. null when it cannot be
-// read: the close time is the filter then.
-async function closerDateOf(run, repo, sha) {
-  if (sha === null) return null;
-  const id = `${repo}:${sha}`;
-  if (run.commits.has(id)) return run.commits.get(id);
-  let date = null;
-  try {
-    const answer = await run.github.api(`repos/${repo}/commits/${sha}`);
-    if (typeof answer?.commit?.committer?.date === "string") date = answer.commit.committer.date;
-  } catch (error) {
-    if (error instanceof GitHubError && error.status === 404) date = null;
-    else throw error;
-  }
-  run.commits.set(id, date);
-  return date;
-}
-
-// The fix boundary of an app problem: the oldest release of the repository
-// whose tag contains the fix commit. With a closer, only a release published
-// at or after the fix commit can hold it.
+// The fix boundary of an app problem. With no closer, the oldest release
+// published at or after the close time. With a closer, the oldest delivery
+// whose tag contains the fix, found by a binary search over the releases in
+// publication order (no date filter: a fix can ship in a release whose build
+// started before the commit).
 async function appBoundary(run, entry, info) {
   const releases = await releasesOf(run, entry.repo);
-  const closerDate = await closerDateOf(run, entry.repo, info.closerSha);
-  const closeAt = closerDate ?? info.closedAt ?? null;
   const candidates = releases
-    .filter((item) => closeAt === null || Date.parse(item.published_at) >= Date.parse(closeAt))
-    .slice()
-    .sort((a, b) => (a.published_at < b.published_at ? -1 : a.published_at > b.published_at ? 1 : 0));
-  for (const release of candidates) {
-    const version = versionOfTag(release.tag_name);
-    const day = dayOf(release.published_at);
-    if (version === null || day === null) continue;
-    if (info.closerSha === null) return { boundary: { type: "app", version }, releasedDay: day };
-    const status = await compareStatus(run, entry.repo, info.closerSha, release.tag_name);
-    if (containsFix(status)) return { boundary: { type: "app", version }, releasedDay: day };
+    .map((item) => ({ item, version: versionOfTag(item.tag_name), day: dayOf(item.published_at) }))
+    .filter((candidate) => candidate.version !== null && candidate.day !== null)
+    .sort((a, b) => Date.parse(a.item.published_at) - Date.parse(b.item.published_at));
+  if (info.closerSha === null) {
+    const closeAt = info.closedAt ?? null;
+    const first = candidates.find((candidate) => closeAt === null || Date.parse(candidate.item.published_at) >= Date.parse(closeAt));
+    if (first === undefined) return null;
+    return { boundary: { type: "app", version: first.version }, releasedDay: first.day };
   }
-  return null;
+  const at = await firstTrue(candidates.length, async (index) => {
+    if (!gate(run)) throw new Deferred(run.stopped ?? "deadline");
+    const status = await compareStatus(run, entry.repo, info.closerSha, candidates[index].item.tag_name);
+    return containsFix(status);
+  });
+  if (at === null) return null;
+  return { boundary: { type: "app", version: candidates[at].version }, releasedDay: candidates[at].day };
 }
 
 // The fix boundary of a system problem: for each image, the oldest tag that
 // contains the fix commit. Every image must have 1, else the key waits.
 async function imageBoundary(run, info, images) {
   if (images.length === 0) return null;
-  // With a closer, the tags are filtered by the date of the fix commit.
-  const closerDate = await closerDateOf(run, IMAGE_REPO, info.closerSha);
-  const stamp = utcStamp(closerDate ?? info.closedAt);
   const found = [];
   for (const image of images) {
-    const tags = await run.sources.listTags(image.id);
-    const candidates = tags
-      .filter((tag) => IMAGE_VERSION.test(tag) && (stamp === null || tag >= stamp))
+    const tags = (await run.sources.listTags(image.id))
+      .filter((tag) => IMAGE_VERSION.test(tag))
       .sort((a, b) => (Number(a) < Number(b) ? -1 : Number(a) > Number(b) ? 1 : 0));
-    let hit = null;
-    for (const tag of candidates) {
-      const labels = await run.sources.imageLabels(image.id, tag);
-      if (info.closerSha === null) {
+    if (info.closerSha === null) {
+      // No closer: the oldest tag created at or after the close time.
+      const stamp = utcStamp(info.closedAt);
+      let hit = null;
+      for (const tag of tags) {
+        if (stamp !== null && tag < stamp) continue;
+        if (!gate(run)) throw new Deferred(run.stopped ?? "deadline");
+        const labels = await run.sources.imageLabels(image.id, tag);
         if (labels.created !== null && info.closedAt !== null && Date.parse(labels.created) >= Date.parse(info.closedAt)) {
           hit = { id: image.id, version: tag, day: dayOf(labels.created) };
           break;
         }
-        continue;
       }
-      if (labels.sourceSha === null) continue;
-      const status = await compareStatus(run, IMAGE_REPO, info.closerSha, labels.sourceSha);
-      if (containsFix(status)) {
-        hit = { id: image.id, version: tag, day: dayOf(labels.created) };
-        break;
-      }
+      if (hit === null) return null;
+      found.push(hit);
+      continue;
     }
-    if (hit === null) return null;
-    found.push(hit);
+    // With a closer: the oldest tag whose label source commit contains the fix.
+    const at = await firstTrue(tags.length, async (index) => {
+      if (!gate(run)) throw new Deferred(run.stopped ?? "deadline");
+      const labels = await run.sources.imageLabels(image.id, tags[index]);
+      if (labels.sourceSha === null) return false;
+      const status = await compareStatus(run, IMAGE_REPO, info.closerSha, labels.sourceSha);
+      return containsFix(status);
+    });
+    if (at === null) return null;
+    const labels = await run.sources.imageLabels(image.id, tags[at]);
+    found.push({ id: image.id, version: tags[at], day: dayOf(labels.created) });
   }
   const days = found.map((item) => item.day).filter((day) => day !== null).sort();
   if (days.length !== found.length) return null;
@@ -797,6 +856,10 @@ async function stepMerged(run, published, key, entry, info) {
   } catch (error) {
     if (error instanceof SourceError) {
       defer(run, "recovery");
+      return;
+    }
+    if (error instanceof Deferred) {
+      defer(run, error.reason);
       return;
     }
     throw error;
