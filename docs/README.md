@@ -23,16 +23,19 @@ Docs are split by the question they answer:
 - [0003 — The intake Worker validates, strips and forwards problem reports](adr/0003-intake-worker-validates-strips-and-forwards.md)
 - [0004 — GlitchTip reads its secrets from an env file and keeps data 72 days](adr/0004-glitchtip-env-file-and-72-day-retention.md)
 - [0005 — The Worker sends no report_id tag to GlitchTip](adr/0005-the-worker-sends-no-report-id-tag.md)
+- [0006 — A daily triage job files verified problems as public issues in the owner repository](adr/0006-a-triage-job-files-verified-problems-as-public-issues.md)
 
 ### Design
 
 - [Problem intake](design/intake.md)
+- [Problem triage](design/triage.md)
 
 ### Specs
 
 - [The intake HTTP API](specs/intake-api.md)
 - [Analytics Engine data points](specs/analytics-points.md)
 - [Weekly aggregates, frostyard.problem-stats/1](specs/stats.md)
+- [Problem triage, frostyard.problem-triage-facts/1](specs/triage.md)
 
 ### Plans
 
@@ -42,6 +45,7 @@ Docs are split by the question they answer:
 
 - [Deploy the Worker](runbook/deploy.md)
 - [GlitchTip on TrueNAS](runbook/glitchtip.md)
+- [Problem triage](runbook/triage.md)
 
 ## Conventions
 
