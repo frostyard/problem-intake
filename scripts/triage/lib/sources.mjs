@@ -64,12 +64,15 @@ function samePathNext(header, current) {
 // git runner (a test injects 1 that fails), `fetchImpl` reads the registry and
 // the index. In a test `config.sources` is the fixture folder: git URLs are
 // file:// URLs, and the registry and the index are files.
-export function createSources({ config, stateDir, runGit, fetchImpl = globalThis.fetch }) {
-  const gitOptions = {
-    timeout: GIT_TIMEOUT_MS,
+export function createSources({ config, stateDir, runGit, fetchImpl = globalThis.fetch, deadline = null, now = Date.now }) {
+  // Each read gets its own timeout, cut to the time left before the run's
+  // deadline, so the source checks cannot run the job past it.
+  const limit = (ms) => (deadline === null ? ms : Math.max(1000, Math.min(ms, deadline - now())));
+  const gitOptions = () => ({
+    timeout: limit(GIT_TIMEOUT_MS),
     maxBuffer: 8 * 1024 * 1024,
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-  };
+  });
   const prefix = config.sources === null ? [] : ["-c", "protocol.file.allow=always"];
 
   const tagSets = new Map();
@@ -86,7 +89,7 @@ export function createSources({ config, stateDir, runGit, fetchImpl = globalThis
   // caller's to map to a SourceError.
   async function git(args) {
     try {
-      const result = await runGit([...prefix, ...args], gitOptions);
+      const result = await runGit([...prefix, ...args], gitOptions());
       return { code: 0, stdout: typeof result === "string" ? result : String(result?.stdout ?? "") };
     } catch (error) {
       const code = Number.isInteger(error?.code) ? error.code : "failed";
@@ -214,9 +217,11 @@ export function createSources({ config, stateDir, runGit, fetchImpl = globalThis
     return lines;
   }
 
-  // The line count of the Rust file of a `location` value (docs/specs/triage.md
-  // decision 4 of the reader: the file at the repository root, or below the
-  // folder of any Cargo.toml of that tag), or null when no candidate exists.
+  // The line count of the Rust file of a `location` value (docs/specs/triage.md,
+  // Verification: the file at the repository root, or below the folder of any
+  // Cargo.toml of that tag), or null when no candidate exists. With several
+  // candidates the longest counts: the location verifies when any of them has
+  // that many lines.
   async function locationLines(repo, tag, path) {
     const paths = new Set(await tree(repo, tag));
     const folders = new Set([""]);
@@ -228,17 +233,19 @@ export function createSources({ config, stateDir, runGit, fetchImpl = globalThis
     for (const folder of [...folders].sort()) {
       if (folder !== "") candidates.push(`${folder}/${path}`);
     }
+    let most = null;
     for (const candidate of candidates) {
       if (!paths.has(candidate)) continue;
-      return await fileLines(repo, tag, candidate);
+      const lines = await fileLines(repo, tag, candidate);
+      if (lines !== null && (most === null || lines > most)) most = lines;
     }
-    return null;
+    return most;
   }
 
   async function readText(url) {
     let response;
     try {
-      response = await fetchImpl(url, { redirect: "error", signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
+      response = await fetchImpl(url, { redirect: "error", signal: AbortSignal.timeout(limit(HTTP_TIMEOUT_MS)) });
     } catch {
       throw new SourceError("http");
     }
@@ -276,7 +283,7 @@ export function createSources({ config, stateDir, runGit, fetchImpl = globalThis
       response = await fetchImpl(url, {
         redirect: "error",
         headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-        signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+        signal: AbortSignal.timeout(limit(HTTP_TIMEOUT_MS)),
       });
     } catch {
       throw new SourceError("registry");

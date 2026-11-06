@@ -137,6 +137,7 @@ async function read(options = {}) {
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
     ...(options.runGit === undefined ? {} : { runGit: options.runGit }),
     ...(options.codeDir === undefined ? {} : { codeDir: options.codeDir }),
+    ...(options.clock === undefined ? {} : { clock: options.clock }),
     stdout: prepared.out,
     stderr: prepared.err,
   });
@@ -509,6 +510,8 @@ test("the unit and the feature allowlists", async () => {
 });
 
 test("the location check: a file below a Cargo.toml folder, and a line too far", async () => {
+  // v0.9.2 has a 3-line src/main.rs at the root and an 18-line
+  // app/src-tauri/src/main.rs: the longer candidate verifies line 12.
   const ok = await oneProblem(nslPanic("src/main.rs:12"));
   assert.equal(ok.facts.problems.length, 1);
   assert.equal(ok.facts.problems[0].location, "src/main.rs:12");
@@ -562,6 +565,17 @@ test("each parent form verifies, and a closure publishes its parent", async () =
     ["github.com/frostyard/chairlift/internal/x.func1", "github.com/frostyard/chairlift/internal/x.func1"],
     ["github.com/frostyard/chairlift/internal/y.(*T).func1", "github.com/frostyard/chairlift/internal/y.(*T).func1"],
     ["github.com/frostyard/chairlift/internal/y.(T).func1", null],
+    // The 2 generic receiver forms, matched and not.
+    ["github.com/frostyard/chairlift/internal/store.(*Box[...]).Put", "github.com/frostyard/chairlift/internal/store.(*Box[...]).Put"],
+    ["github.com/frostyard/chairlift/internal/store.(*Box[...]).Missing", null],
+    ["github.com/frostyard/chairlift/internal/store.Box[...].Get", "github.com/frostyard/chairlift/internal/store.Box[...].Get"],
+    ["github.com/frostyard/chairlift/internal/store.Box[...].Put", null],
+    // Each plain form not matched: no such function, a value method looked up
+    // as a pointer receiver's name, a pointer method as a value method.
+    ["github.com/frostyard/chairlift/internal/store.Missing", null],
+    ["github.com/frostyard/chairlift/internal/load.Missing[...]", null],
+    ["github.com/frostyard/chairlift/internal/store.(*Store).Missing", null],
+    ["github.com/frostyard/chairlift/internal/store.Store.Write", null],
   ];
   let id = 60;
   for (const [frame, published] of rows) {
@@ -1271,4 +1285,107 @@ test("a frame of another frostyard module and a standard library frame are fixed
     "frostyard",
     "github.com/frostyard/chairlift/internal/store.Migrate",
   ]);
+});
+
+
+// --- review guards ----------------------------------------------------------
+
+// A forged event that is newer than a real 1 of the same version must not
+// hold the real 1 back: the minimum of 1 verified routed frame is a check of
+// each observation, before the representative event is chosen.
+test("a newer event with no verified routed frame does not hide an older real 1", async () => {
+  const head = ["runtime.gopanic", "runtime.panicmem", "main.main"];
+  const real = chairliftPanic([...head, "github.com/frostyard/chairlift/internal/store.Migrate"]);
+  const forged = chairliftPanic([...head, "github.com/frostyard/chairlift/internal/store.Forged"]);
+  const run = await read({
+    issues: [
+      issue(301, [
+        { report: forged, dateCreated: "2026-11-20T10:00:00Z" },
+        { report: real, dateCreated: "2026-11-19T10:00:00Z" },
+      ]),
+    ],
+  });
+  assert.equal(run.facts.problems.length, 1);
+  assert.equal(run.facts.held.unverified_code, 0);
+  assert.deepEqual(run.facts.problems[0].frames, [
+    "runtime",
+    "runtime",
+    "main",
+    "github.com/frostyard/chairlift/internal/store.Migrate",
+  ]);
+  assert.equal(run.facts.problems[0].observations[0].last_seen_day, "2026-11-19");
+});
+
+// A new issue of a released key, with no earlier mapping, that fails its
+// source check keeps the watched entry partial.
+test("watched: a newly learned issue of a released key held source_unavailable is partial", async () => {
+  const report = chairliftError();
+  const key = problemKey(report, "chairlift");
+  const run = await read({
+    published: {
+      schema: "frostyard.problem-triage-published/1",
+      keys: { [key]: { state: "released", glitchtip_issue_ids: [] } },
+    },
+    runGit: async () => {
+      throw Object.assign(new Error("git is not readable in this test"), { code: "failed" });
+    },
+    issues: [issue(302, [{ report, dateCreated: "2026-11-20T10:00:00Z" }])],
+  });
+  assert.equal(run.facts.run.status, "ok");
+  assert.equal(run.facts.held.source_unavailable, 1);
+  assert.deepEqual(run.facts.watched, [{ key, coverage: "partial" }]);
+  assert.equal(healthOf(run).issue_keys["302"], key);
+});
+
+// An issue with no valid report in its 30 days learns its key from an older
+// event; read in full, it cannot hold a qualifying observation.
+test("watched: an issue with only old events still gives its key, and the entry stays complete", async () => {
+  const report = unitFailed();
+  const key = problemKey(report, "snosi");
+  const run = await read({
+    published: {
+      schema: "frostyard.problem-triage-published/1",
+      keys: { [key]: { state: "released", glitchtip_issue_ids: [] } },
+    },
+    issues: [issue(303, [{ report, dateCreated: "2026-09-01T10:00:00Z" }], "2026-09-01T10:00:00Z")],
+  });
+  assert.equal(healthOf(run).issue_keys["303"], key);
+  assert.deepEqual(run.facts.problems, []);
+  assert.deepEqual(run.facts.watched, [{ key, coverage: "complete" }]);
+});
+
+// The deadline covers the source checks too: past it, the key is held
+// request_cap and the run is partial.
+test("the deadline stops the source checks: request_cap and partial", async () => {
+  let expired = false;
+  const real = (args, options) => new Promise((resolve, reject) => {
+    execFile("git", args, options, (error, stdout) => (error ? reject(Object.assign(error, { stdout })) : resolve({ stdout })));
+  });
+  const run = await read({
+    clock: () => (expired ? NOW + 16 * 60 * 1000 : NOW),
+    runGit: async (args, options) => {
+      expired = true;
+      return await real(args, options);
+    },
+    issues: [
+      issue(304, [{ report: chairliftError(), dateCreated: "2026-11-20T10:00:00Z" }]),
+      issue(305, [{ report: unitFailed(), dateCreated: "2026-11-20T10:00:00Z" }]),
+    ],
+  });
+  assert.equal(run.facts.run.status, "partial");
+  assert.equal(run.exitCode, 0);
+  assert.ok(run.facts.held.request_cap >= 1, `request_cap ${run.facts.held.request_cap}`);
+  assert.equal(run.facts.problems.length + run.facts.held.request_cap, 2);
+});
+
+// GlitchTip 6.2.6 serves `date_created` on the event list; the Sentry form
+// `dateCreated` is read too.
+test("an event row in the Sentry camel case form is read too", async () => {
+  mock.state.camelEvents = true;
+  try {
+    const run = await oneProblem(unitFailed(), { id: 306 });
+    assert.equal(run.facts.problems.length, 1);
+  } finally {
+    mock.state.camelEvents = false;
+  }
 });

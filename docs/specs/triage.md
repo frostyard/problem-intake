@@ -221,11 +221,14 @@ report comes. `complete` means all 3 of these hold:
 
 - the issue list was read in full (every page);
 - every GlitchTip issue known to map to that key (`health.json` `issue_keys`, or
-  the key's `glitchtip_issue_ids` in `published.json`) was read in full for the
-  last 30 days with every source check run;
+  the key's `glitchtip_issue_ids` in `published.json`, or the key that this run
+  learned) was read in full for the last 30 days with every source check run;
 - every issue of the list whose key is still unknown at the end of the run was
   read far enough to learn its key, except the issues held `before_cutoff`,
-  which take no part ([Reader](#reader) step 2).
+  which take no part ([Reader](#reader) step 2). An issue with no valid report
+  in its last 30 days gives its key from its newest older event; an issue that
+  was read in full and holds no valid report at all cannot hold a qualifying
+  observation, so it does not make the entry `partial`.
 
 Else the entry is `partial`, including when `run.status` is not `ok` or an issue
 of that key was held `source_unavailable` or `request_cap`. So an issue that the
@@ -350,8 +353,10 @@ word `frostyard` keeps free text out of a public issue.
    (`GET /api/0/issues/{id}/events/?full=true`, newest first, every page until
    an event older than 30 days). The load cap: at most 1000 GlitchTip requests
    a run, a pause of 200 ms between requests, 20 seconds for each request and
-   15 minutes for the run. An issue whose read the cap cuts gets `coverage`
-   `partial`; an issue not reached is held `request_cap`.
+   15 minutes for the run. The 15 minutes cover the source checks of step 6
+   too: a key whose checks the deadline stops is held `request_cap`. An issue
+   whose read the cap cuts gets `coverage` `partial`; an issue not reached is
+   held `request_cap`.
 5. **Each event alone.** From an event's tags and `extra.detail` the reader
    rebuilds the report fields and computes the problem key
    ([Problem key](#problem-key-and-published-forms)). An event whose raw
@@ -444,7 +449,7 @@ registry and index reads are anonymous.
 | `image.version`, `target_version`, `newer_version` | the tag exists in `ghcr.io/frostyard/<image.id>` (registry `tags/list`); order is numeric | as above |
 | sysext `version` | a file `<feature>_<version>_…` is listed in `https://repository.frostyard.org/ext/<feature>/SHA256SUMS`, the index that the feature's `.transfer` file reads | `feature_version` is dropped from that observation |
 | `code` | the literal `"<code>"` (with the quotes) is in the repository at the tag of that observation's `app_version` (`git grep -F`) | that observation is dropped |
-| `frames` | the frame rule below, at the tag of that observation's `app_version`; a tag that cannot be read holds the problem `source_unavailable` | that observation is dropped |
+| `frames` | the frame rule below, at the tag of that observation's `app_version`; a tag that cannot be read holds the problem `source_unavailable`. Each observation also needs at least 1 verified frame of the routed module among its first 32 frames, so a forged newer event cannot hold a real 1 back by being the representative event | that observation is dropped |
 | `location` | the file exists at that version's tag and has at least that many lines; the path is relative to the repository root or to the folder of a `Cargo.toml` at that tag (a Rust panic location is relative to its crate, such as `app/src-tauri/`) | that observation is dropped |
 | the shown frames after the first 3 | the frame rule below, at the tag of the representative event's `app_version` | the frame is shown as `unverified`; a problem with no verified frame of the routed module among its shown frames is held `unverified_code` |
 | `unit` | in `triage/allow/units.txt` | held `not_allowlisted` |

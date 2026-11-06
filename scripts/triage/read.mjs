@@ -111,11 +111,15 @@ function parseIssueRow(row) {
   };
 }
 
+// GlitchTip 6.2.6 answers the event list of an issue with the field names of
+// its schema (`date_created`): that route has no `by_alias`, unlike the issue
+// list. The Sentry form `dateCreated` is read too.
 function parseEventRow(row) {
   if (!isObject(row)) throw new ReadError("error");
-  const time = typeof row.dateCreated === "string" ? Date.parse(row.dateCreated) : Number.NaN;
+  const created = typeof row.date_created === "string" ? row.date_created : row.dateCreated;
+  const time = typeof created === "string" ? Date.parse(created) : Number.NaN;
   if (!Number.isFinite(time)) throw new ReadError("error");
-  return { dateCreated: row.dateCreated, time, tags: row.tags, context: row.context };
+  return { dateCreated: created, time, tags: row.tags, context: row.context };
 }
 
 function readNameList(path) {
@@ -351,7 +355,13 @@ export async function runReader(options = {}) {
     sleep,
     fetchImpl,
   });
-  const sources = createSources({ config, stateDir, runGit, fetchImpl });
+  const deadline = nowMs + (options.deadlineMs ?? DEADLINE_MS);
+  const sources = createSources({ config, stateDir, runGit, fetchImpl, deadline, now: clock });
+  // The deadline covers the source checks too: past it, the rest of the work
+  // is held request_cap and the run is partial.
+  const checkDeadline = () => {
+    if (clock() >= deadline) throw new CapError("deadline");
+  };
 
   // The result of each source check is kept for 1 (value, tag) pair for the
   // rest of the run; a failed check keeps its failure.
@@ -417,6 +427,7 @@ export async function runReader(options = {}) {
   // own app version. A version that fails drops the observation; a code, frame
   // or location value that fails drops it too.
   async function verifyObservation(entry, group) {
+    checkDeadline();
     const report = entry.report;
     const image = report.image.id;
     const variant = variantOf(report);
@@ -435,14 +446,26 @@ export async function runReader(options = {}) {
         );
         if (!found) return { ok: false, versionOk: true };
       }
-      const frames = Array.isArray(report.detail.frames) ? report.detail.frames.slice(0, 3) : [];
+      const frames = Array.isArray(report.detail.frames) ? report.detail.frames.slice(0, 32) : [];
       if (frames.length > 0) {
         const module = await moduleOf(group.repo, tag);
-        for (const frame of frames) {
+        for (const frame of frames.slice(0, 3)) {
           if ((await frameVerifies(group.repo, tag, frame, group.name, module)) === false) {
             return { ok: false, versionOk: true };
           }
         }
+        // At least 1 frame of the routed module among the frames that the issue
+        // would show must verify at this observation's own version. A check of
+        // each observation, so a forged event cannot hold a real 1 back by
+        // being the representative event.
+        let anyVerified = false;
+        for (const frame of frames) {
+          if ((await frameVerifies(group.repo, tag, frame, group.name, module)) === true) {
+            anyVerified = true;
+            break;
+          }
+        }
+        if (!anyVerified) return { ok: false, versionOk: true };
       }
       if (typeof report.detail.location === "string") {
         const location = report.detail.location;
@@ -540,6 +563,7 @@ export async function runReader(options = {}) {
       let cursor = null;
       let cut = false;
       let gone = false;
+      let firstOld = null;
       const events = [];
       try {
         for (;;) {
@@ -553,6 +577,7 @@ export async function runReader(options = {}) {
             const event = parseEventRow(row);
             if (event.time < windowStart) {
               reachedOld = true;
+              if (firstOld === null) firstOld = event;
               continue;
             }
             events.push(event);
@@ -598,7 +623,18 @@ export async function runReader(options = {}) {
         }
         reports.push({ event, report, fingerprint: JSON.stringify(rawFingerprint(report)) });
       }
-      if (reports.length === 0) continue;
+      if (reports.length === 0) {
+        // No valid report in the last 30 days. The newest older event still
+        // tells the key, so the watched coverage knows this issue; it gives no
+        // observation.
+        const old = firstOld === null ? null : rebuildReport(firstOld);
+        if (old !== null) {
+          const oldRoute = route(old, routes);
+          issue.key = problemKey(old, oldRoute.repo === undefined ? "" : repoName(oldRoute.repo));
+          newIssueKeys.set(issue.idText, issue.key);
+        }
+        continue;
+      }
 
       // The main raw fingerprint: the one of most of the events, and of the
       // newest event when 2 have the same count.
@@ -623,13 +659,14 @@ export async function runReader(options = {}) {
       const routed = route(newestEntry.report, routes);
       issue.route = routed;
       issue.reports = kept;
+      // The key comes from the raw fingerprint alone, so a held issue has 1 too.
+      issue.name = routed.repo === undefined ? "" : repoName(routed.repo);
+      issue.key = problemKey(newestEntry.report, issue.name);
+      newIssueKeys.set(issue.idText, issue.key);
       if (routed.held !== undefined) {
         held[routed.held] += 1;
         continue;
       }
-      issue.name = repoName(routed.repo);
-      issue.key = problemKey(newestEntry.report, issue.name);
-      newIssueKeys.set(issue.idText, issue.key);
     }
 
     // Steps 6 and 7: group the issues by key and decide each problem.
@@ -650,6 +687,7 @@ export async function runReader(options = {}) {
       const entries = group.issues.flatMap((issue) => issue.reports);
       let reason = null;
       try {
+        checkDeadline();
         const live = entries.filter((entry) => !isNoise(entry.report));
         const first = live[0]?.report ?? null;
         if (live.length === 0) {
@@ -721,8 +759,16 @@ export async function runReader(options = {}) {
           }
         }
       } catch (error) {
-        if (!(error instanceof SourceError)) throw error;
-        reason = "source_unavailable";
+        if (error instanceof CapError) {
+          // The deadline stopped the checks of this key.
+          reason = "request_cap";
+          partialRun = true;
+          for (const issue of group.issues) issue.cut = true;
+        } else if (error instanceof SourceError) {
+          reason = "source_unavailable";
+        } else {
+          throw error;
+        }
       }
       if (reason !== null) {
         held[reason] += issueCount;
@@ -733,8 +779,11 @@ export async function runReader(options = {}) {
     // The `watched` entries: a released key collects no covered day unless the
     // whole read of that key was complete (docs/specs/triage.md, the facts
     // schema).
-    const readEnough = !issues.some(
-      (issue) => issue.status !== "before_cutoff" && !issue.gone && issue.pages === 0,
+    // Every issue whose key is still unknown must have been read in full:
+    // then it holds no valid report of the last 30 days, and so no qualifying
+    // observation of any key. An issue the cap or the deadline cut is not.
+    const readEnough = !candidates.some(
+      (issue) => !issue.gone && issue.key === null && knownKey(issue) === null && (issue.pages === 0 || issue.cut),
     );
     const inList = new Map(issues.map((issue) => [issue.idText, issue]));
     const watched = watchedKeys.map((key) => {
@@ -743,6 +792,8 @@ export async function runReader(options = {}) {
         const ids = new Set();
         for (const [id, value] of Object.entries(healthIssueKeys)) if (value === key) ids.add(id);
         for (const id of publishedKeys[key]?.glitchtip_issue_ids ?? []) ids.add(String(id));
+        // And every issue whose key this run learned.
+        for (const issue of candidates) if (issue.key === key) ids.add(issue.idText);
         for (const id of ids) {
           const issue = inList.get(id);
           if (issue === undefined || issue.gone) continue;

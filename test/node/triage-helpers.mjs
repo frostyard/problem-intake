@@ -20,14 +20,14 @@ export function exampleReport(name) {
 // 1 row of the events endpoint, shaped like GlitchTip's IssueEventSchema: the
 // event id (never written out), the time, the tags and `context`, which is the
 // event's `extra`.
-export function eventRow(report, dateCreated) {
+// GlitchTip 6.2.6 serves the event list of an issue with the field names of
+// its schema (`event_id`, `date_created`), not the camel case of the issue
+// list; `camel` gives the Sentry form instead.
+export function eventRow(report, dateCreated, camel = false) {
   const event = buildEvent(report);
-  return {
-    eventID: event.event_id,
-    dateCreated,
-    tags: Object.entries(event.tags).map(([key, value]) => ({ key, value })),
-    context: event.extra,
-  };
+  const tags = Object.entries(event.tags).map(([key, value]) => ({ key, value }));
+  if (camel) return { eventID: event.event_id, dateCreated, tags, context: event.extra };
+  return { event_id: event.event_id, date_created: dateCreated, tags, context: event.extra };
 }
 
 // 1 issue row of the issue list, with its events.
@@ -52,7 +52,9 @@ function link(url, rows, start, end, size) {
   } else {
     parts.push(`<${url.href}>; rel="next"; results="false"`);
   }
-  return parts.join(", ");
+  // GlitchTip 6.2.6 sets the header from a Python set, so its value is the
+  // set's text: `{'<...>; rel="previous"; ..., <...>; rel="next"; ...'}`.
+  return `{'${parts.join(", ")}'}`;
 }
 
 // A running mock. `plan` holds answers for the next requests (`{ status,
@@ -66,6 +68,7 @@ export async function startMock(options = {}) {
     plan: [],
     handler: null,
     delayMs: 0,
+    camelEvents: false,
   };
 
   const answer = (res, directive) => {
@@ -133,7 +136,7 @@ export async function startMock(options = {}) {
         paged(
           res,
           url,
-          issue.events.map((one) => (one.context !== undefined ? one : eventRow(one.report, one.dateCreated))),
+          issue.events.map((one) => (one.context !== undefined ? one : eventRow(one.report, one.dateCreated, state.camelEvents))),
         );
         return;
       }
