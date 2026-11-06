@@ -79,7 +79,16 @@ function failedStdout(error) {
 // 2 limits: `softLimit` stops the loop work and throws BudgetError, so that the
 // reserved calls stay for the health issue; `limit` is the hard limit of the
 // run. raiseBudget() lifts the soft limit to the hard 1 for the health issue.
-export function createGitHub({ env = process.env, limit = 150, softLimit = limit, clock = null, deadlineAt = null } = {}) {
+// `exec` runs 1 command (default `execFileSync`); a test injects it to see the
+// timeout of a call and to answer a timeout with no real wait.
+export function createGitHub({
+  env = process.env,
+  limit = 150,
+  softLimit = limit,
+  clock = null,
+  deadlineAt = null,
+  exec = execFileSync,
+} = {}) {
   let count = 0;
   let soft = Math.max(0, Math.min(softLimit, limit));
   // The health phase runs after the deadline, in the 60 second reserve.
@@ -106,7 +115,7 @@ export function createGitHub({ env = process.env, limit = 150, softLimit = limit
     const timeout = callTimeout();
     count += 1;
     try {
-      return execFileSync("gh", args, {
+      return exec("gh", args, {
         env,
         input,
         encoding: "utf8",

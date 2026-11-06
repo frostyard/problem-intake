@@ -208,6 +208,7 @@ export async function main({ now = new Date(), env = process.env, hooks = {} } =
       softLimit: Math.max(0, Budget - RESERVE),
       clock,
       deadlineAt,
+      ...(typeof hooks.exec === "function" ? { exec: hooks.exec } : {}),
     }),
     sources: createDelivery({ config, clock, deadline: deadlineAt, fetch: hooks.fetch ?? globalThis.fetch }),
     deferred: {},
@@ -349,13 +350,27 @@ async function deliverNotifications(run, issue) {
       return;
     }
     const marker = health.notificationMarker(notification.id);
+    // The reason a page gate stopped the read: the deadline, the budget of the
+    // run, or the 2-call reserve of the body. Only a read that ran out of
+    // pages with no such stop is `recovery`.
+    let stop = null;
     const comments = await health.commentsSince(run.github, issue.number, `${notification.since}T00:00:00Z`, {
-      gate: () => gate(run) && run.github.remaining() > NOTIFICATION_RESERVE,
+      gate: () => {
+        if (!gate(run)) {
+          stop = run.stopped ?? "deadline";
+          return false;
+        }
+        if (run.github.remaining() <= NOTIFICATION_RESERVE) {
+          stop = "budget";
+          return false;
+        }
+        return true;
+      },
       pages: Number.isSafeInteger(run.hooks.commentPages) ? run.hooks.commentPages : health.COMMENT_PAGES,
     });
     if (comments === null) {
       // An incomplete read cannot say the comment is missing: the entry waits.
-      defer(run, run.stopped ?? "recovery");
+      defer(run, stop ?? "recovery");
       return;
     }
     if (!health.hasMachineMarkerLine(comments, marker)) {

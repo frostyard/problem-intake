@@ -4,6 +4,7 @@
 // state file, and each test passes `now`. Image labels and the sysext index
 // come from a temporary TRIAGE_SOURCES folder.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -3074,6 +3075,42 @@ test("the notification work leaves 2 calls for the body, and the next run delive
   assert.deepEqual(readHealth(world).notifications, []);
 });
 
+test("a comment read that the 2-call reserve stops counts budget, not recovery", async () => {
+  const world = makeWorld({ labels: {} });
+  // 450 comments: the read needs 5 pages; after 4 pages only the 2 calls of
+  // the reserve are left, so the reserve stops the read before page 5.
+  const comments = [];
+  for (let i = 0; i < 450; i += 1) {
+    comments.push({ author: "a-drive-by", association: "NONE", body: `chatter ${i}`, createdAt: "2026-11-21T10:00:00Z" });
+  }
+  addIssue(world, "frostyard/problem-intake", {
+    number: 1,
+    title: "Problem triage health",
+    body: "Operational status of the problem-intake triage job.",
+    labels: ["problem-report"],
+    comments,
+  });
+  writeHealthFile(world, {
+    schema: "frostyard.problem-triage-health/1",
+    runs: [{ day: "2026-11-20", status: "ok", notes: [], held: {}, deferred: {}, rotation_due: false }],
+    notifications: [],
+    last_read: {},
+    issue_keys: {},
+  });
+  writeFacts(world, factsDoc({ status: "auth" }));
+
+  assert.equal(await run(world, { hooks: { limit: 8 } }), 0);
+  // Page 5 was never asked for: the reserve stopped the read.
+  const pages = ghState(world).calls.filter((call) => call[0] === "api" && /issues\/1\/comments\?/.test(String(call[1])));
+  assert.equal(pages.length, 4, `comment pages read: ${pages.length}`);
+  assert.deepEqual(commentPosts(world), []);
+  assert.equal(readHealth(world).notifications.length, 1);
+  const entry = readHealth(world).runs.at(-1);
+  assert.ok(entry.deferred.budget > 0, JSON.stringify(entry.deferred));
+  assert.equal(entry.deferred.recovery, 0, JSON.stringify(entry.deferred));
+  assert.equal(readHeartbeat(world), DAY);
+});
+
 test("a search page that repeats an issue is no rebuild", async () => {
   const world = makeWorld({ labels: { "frostyard/snosi": ["problem-report"] } });
   seedJobIssues(world, 250);
@@ -3149,18 +3186,32 @@ test("a work call killed at the remaining work time defers the deadline", async 
     { tag_name: "v0.15.0", published_at: "2026-11-20T12:00:00Z", draft: false, prerelease: false },
   ]);
   writeFacts(world, factsDoc({ problems: [] }));
-  // The releases call answers after 3 seconds; the work time left is 1.5.
-  const state = ghState(world);
-  state.slowPath = "releases";
-  state.slowMs = 3000;
-  writeGh(world, state);
+  // The work time left is 1.5 seconds. The injected executor answers the
+  // releases call as execFileSync answers a call that its timeout killed:
+  // no real wait, no wall clock. Every other call runs the fake gh with no
+  // timeout at all, so a slow machine changes nothing.
   let reads = 0;
   const clock = () => {
     reads += 1;
     return reads === 1 ? 0 : 10 * 60 * 1000 - 1500;
   };
+  const timeouts = [];
+  const exec = (command, args, options) => {
+    if (args[0] === "api" && String(args[1]).includes("/releases")) {
+      timeouts.push(options.timeout);
+      throw Object.assign(new Error("spawnSync gh ETIMEDOUT"), {
+        code: "ETIMEDOUT",
+        signal: "SIGTERM",
+        stdout: "",
+        stderr: "",
+      });
+    }
+    return execFileSync(command, args, { ...options, timeout: undefined });
+  };
 
-  assert.equal(await run(world, { hooks: { clock } }), 0);
+  assert.equal(await run(world, { hooks: { clock, exec } }), 0);
+  // The call got the remaining work time as its timeout, not the 60 s cap.
+  assert.deepEqual(timeouts, [1500]);
   const entry = readHealth(world).runs.at(-1);
   assert.equal(entry.deferred.deadline > 0, true);
   assert.equal(ghState(world).repos["frostyard/problem-intake"].issues.length, 1);

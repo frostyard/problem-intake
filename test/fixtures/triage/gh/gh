@@ -4,7 +4,7 @@
 // so a test can see the calls of a run. No network, no wall clock: the state
 // file holds every issue, comment, release, label and compare answer, and the
 // switches of a test: `searchTotalCount`, `searchIncomplete`, `searchOverlap`,
-// `graphqlErrors`, `failCommentPost`, `failReopen`, `slowPath` and `slowMs`.
+// `graphqlErrors`, `failCommentPost` and `failReopen`.
 //
 // Paths: `api repos/...`, `api graphql`, and `search issues`.
 import { readFileSync, writeFileSync, writeSync } from "node:fs";
@@ -177,11 +177,6 @@ if (argv[0] !== "api") fail(404, "Not Found");
 let at = 1;
 const path = argv[at];
 
-// `slowPath` makes 1 path wait, for the timeout test: no network, no sleep in
-// the job's own code.
-if (typeof state.slowPath === "string" && String(path).includes(state.slowPath)) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(state.slowMs ?? 2000));
-}
 at += 1;
 let method = "GET";
 let input = null;
