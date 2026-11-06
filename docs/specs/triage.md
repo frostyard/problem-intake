@@ -65,7 +65,7 @@ The state folder is `~/.local/state/problem-triage/`, mode `0700`, owner
 | --- | --- | --- |
 | `facts.json` | `0600` | the document of [the facts schema](#the-facts-schema-frostyardproblem-triage-facts1) |
 | `published.json` | `0600` | 1 entry for each tracked problem key ([Close the loop](#close-the-loop)) |
-| `health.json` | `0600` | the last 7 runs (`day`, `run.status`, `notes`, the held counts, the deferred counts), `last_read` (GlitchTip issue id to the day the reader last read it) and `issue_keys` (GlitchTip issue id to problem key, for each issue whose key the reader learned from its first event page; ids and keys only, no report value) |
+| `health.json` | `0600` | the last 7 runs (`day`, `run.status`, `notes`, the held counts, the deferred counts by reason, `rotation_due`), `last_read` (GlitchTip issue id to the day the reader last read it) and `issue_keys` (GlitchTip issue id to problem key, for each issue whose key the reader learned from its first event page; ids and keys only, no report value) |
 | `heartbeat` | `0600` | the day (`YYYY-MM-DD`) of the last run whose publisher ended |
 | `cache/` | `0700` | `git/<owner>__<repo>` clones of the routed repositories, and the registry and index answers of the run |
 
@@ -685,17 +685,20 @@ existing `gh` sign-in.
   `scripts/triage/lib/github.mjs`; 1 GraphQL query reads the state, the closer
   and the comments of all tracked issues of 1 repository, and release lists and
   image labels are read once a run and kept in memory); a deadline of 10
-  minutes. Work over a limit waits for the next run, in the same order.
-- **Mute.** An issue closed as "not planned" mutes its key: the publisher
-  never comments on it and never reopens it.
+  minutes. The last 6 calls of the 150 are kept for the health issue, so a run
+  that reaches the limit still writes it. Work over a limit waits for the next
+  run, in the same order.
+- **Mute.** An issue closed as "not planned" or as "duplicate" mutes its key:
+  the publisher never comments on it and never reopens it. A duplicate is no
+  fix, so it never starts a release step.
 - **Health.** `health.json` keeps the last 7 runs and `last_read`, mode `0600`;
   agents may read it, because it holds counts and days and no report value. 1
   open issue in `frostyard/problem-intake` titled `Problem triage health` holds
   the public status only: `run.status`, `run.notes`, "token rotation due: yes or
   no" (`yes` from token day 335) and "work deferred: yes or no". No day and no
-  count. The publisher rewrites its body each run, and adds a comment only when
-  `run.status` turns from `ok` to another value, and once when token rotation
-  turns due (token day 335), with the fixed text "The GlitchTip read token is
+  count. The publisher sets its body each run (an unchanged body is not sent
+  again), and adds a comment only when `run.status` turns from `ok` to another
+  value, and once when token rotation turns due (token day 335), with the fixed text "The GlitchTip read token is
   due for rotation." A run that never completes is the watchdog's comment, not
   the publisher's.
 - **Watchdog.** `scripts/triage/watchdog.mjs` runs at 12:00
@@ -813,9 +816,12 @@ again from the recovery day.
      versions is assumed.
 
    The publisher reopens the issue and comments (marker `step=regressed`,
-   `cycle` + 1): "Seen again in <version>, at or after the fix release
-   <boundary>." The cycle starts again at step 2. An observation below the
-   boundary is a host that has not updated: no action.
+   `cycle` + 1, `boundary` the fix boundary that the report reached): "Seen
+   again in <version>, at or after the fix release <boundary>." `<version>` has
+   the token form of the boundary (`app:<semver>`, `image:<id>:<14 digits>` or
+   `feature:<name>:<version>`). The entry changes only after that comment: then
+   `boundary`, `released_day` and `feature_index` become `null`. The cycle
+   starts again at step 2. An observation below the boundary is a host that has not updated: no action.
 
 This version rule is the loop's authority. GlitchTip's own status cannot be:
 our events carry no `release`, so GlitchTip reopens a resolved issue on any
