@@ -452,16 +452,31 @@ registry and index reads are anonymous.
 
 ### The frame rule
 
-A frame is published in 3 steps: the closure suffix, the parent form, then the
-check by that form.
+A frame of the routed module is parsed with no tag, in a fixed order, and then
+checked at the tag of its observation.
 
-1. **Strip the closures.** From the end of the raw frame, remove 0 to 2 closure
-   suffixes, each `\.func[1-9][0-9]{0,2}` or `\.[1-9][0-9]{0,2}`, so `.func1`,
-   `.func1.2` and `.2`. The rest is the parent frame. The published form of a
-   verified closure frame is its parent frame
+1. **Split the frame.** The module part comes first ([Routed module](#routed-module)).
+   After it come 0 or more package path segments `/[A-Za-z0-9_-]+` (a segment
+   holds no `.`), then 1 `.`. The first `.` after the module part therefore
+   ends `<pkgpath>`, and the text after it is the symbol `S`.
+2. **Strip the closures, most first.** A closure suffix is
+   `\.func[1-9][0-9]{0,2}` or `\.[1-9][0-9]{0,2}` at the end of `S`. Try, in
+   this order: remove 2 suffixes, remove 1 suffix, remove none. The first
+   remainder that is 1 of the parent forms of step 3 is the parent; the number
+   of removed suffixes is the closure depth. When no remainder is a parent
+   form, the frame does not verify. Examples:
+   - `F.func1.2` is the closure of `F` (depth 2); `F.func1` is the closure of
+     `F` (depth 1).
+   - `func1` (a free function named `func1`): removing `.func1` leaves an empty
+     symbol, which is no parent form, so the parent is `func1` (depth 0).
+   - `(*T).func1` (a pointer method named `func1`): removing `.func1` leaves
+     `(*T)`, which is no parent form, so the parent is `(*T).func1` (depth 0).
+   - Tie-break: `F.func1` also fits the value method form (method `func1` of
+     type `F`). The order above makes it the closure of `F`, always.
+   The published form of a verified frame is its parent frame
    ([Published forms of a frame](#published-forms-of-a-frame)), so no closure
    number goes out and the key does not depend on it.
-2. **The parent form.** The parent MUST be 1 of these 6 forms, where `N` is a Go
+3. **The parent form.** The parent MUST be 1 of these 6 forms, where `N` is a Go
    identifier `[A-Za-z_][A-Za-z0-9_]*`, the generic part is the literal 3
    characters `[...]`, and `M` is the module part of the frame
    ([Routed module](#routed-module)):
@@ -482,7 +497,7 @@ check by that form.
    `M` is written escaped, so that every character of it is literal. Any other
    content between the brackets does not match, so `F[private_token]` and
    `(*T[x]).F` do not match the grammar.
-3. **The check depends on the form.** It runs in `<pkgpath>/*.go` at the tag of
+4. **The check depends on the form.** It runs in `<pkgpath>/*.go` at the tag of
    the observation, not `_test.go`, with `N` replaced by the function name and
    `T` by the type name:
 
@@ -520,16 +535,34 @@ A frame that does not verify is shown as `unverified`
 #### Routed module
 
 A frame belongs to the routed module when it starts with
-`github.com/frostyard/<repo>` followed by `.` or `/`, or by `/v<N>` (`N` 2 or
-more: `v[2-9][0-9]*`) and then `.` or `/`, where `<repo>` is the repository name
-of the route in [`triage/routes.json`](../../triage/routes.json); all 7 app
-repositories have the module `github.com/frostyard/<repo>` today. The module
-part of the frame is that prefix.
+`github.com/frostyard/<repo>` followed by `.` or `/`, where `<repo>` is the
+repository name of the route in [`triage/routes.json`](../../triage/routes.json);
+all 7 app repositories have the module `github.com/frostyard/<repo>` today.
+
+The module part of the frame is found with no tag, by 1 rule: it is
+`github.com/frostyard/<repo>/v<N>` when the frame continues with `/v<N>`
+followed by `.` or `/`, where `<N>` matches `([2-9]|[1-9][0-9]+)` (2, 9, 10,
+20, …); else it is `github.com/frostyard/<repo>`. A major version segment
+therefore always belongs to the module part, never to `<pkgpath>`. Examples:
+
+| Raw frame start | Module part | `<pkgpath>` |
+| --- | --- | --- |
+| `github.com/frostyard/app/internal/x.F` | `github.com/frostyard/app` | `internal/x` |
+| `github.com/frostyard/app/v2/pkg.F` | `github.com/frostyard/app/v2` | `pkg` |
+| `github.com/frostyard/app/v10.F` | `github.com/frostyard/app/v10` | none |
+| `github.com/frostyard/app/v20/x.F` | `github.com/frostyard/app/v20` | `x` |
+| `github.com/frostyard/app/v1/x.F` | `github.com/frostyard/app` | `v1/x` |
+| `github.com/frostyard/app/vendor2/x.F` | `github.com/frostyard/app` | `vendor2/x` |
+
+A frame of a module whose `go.mod` names no major version, but with a package
+folder named like `v2`, gets the versioned module part by this rule, fails the
+`module` line check, and does not verify. Go modules avoid such folder names,
+so this is accepted.
 
 This classification uses no tag, so 1 raw frame always gets the same rule, and
 the key depends only on the raw fingerprint. The tag is used only for the
 verification: the module part MUST equal the `module` line of `go.mod` at the
-observation's `app_version`, and the check of step 3 MUST pass; else that
+observation's `app_version`, and the check of step 4 MUST pass; else that
 observation is dropped ([Reader](#reader) step 6). When the tag cannot be read,
 the problem is held `source_unavailable`: the classification and the key are
 known, but no value goes out.
@@ -832,6 +865,8 @@ These fixtures are required, beside the ones above. The reader tests live in
 | reader | Key stability: the same raw fingerprint at 2 app versions, with 1 frame removed in the newer release, gives the same key or drops the observation; it never gives a new key |
 | reader | A fingerprint value that verifies at version 1 and not at version 2 drops the version 2 observation and keeps the key; with every observation dropped the problem is held `unverified_code` |
 | reader | A module that moves to `/v2`: the old raw frame at the new tag drops the observation and keeps the key |
+| reader | Closure parsing: a free function named `func1` and a pointer method `(*T).func1` verify as themselves (depth 0); `F.func1` and `F.func1.2` are closures of `F` (the tie-break) |
+| reader | Module part: `github.com/frostyard/app`, `/v2`, `/v10`, `/v20`, `/v1` (a package segment) and `/vendor2` (a package segment) give the module part and `<pkgpath>` of the [Routed module](#routed-module) table |
 | reader | A tag that cannot be read: the problem is held `source_unavailable` and the key is the same |
 | reader | `watched`: a `released` key with no GlitchTip issue any more is `complete` when the issue list was read in full; a `released` key whose issue was held `source_unavailable` or `request_cap` is `partial`; a `released` key held `unverified_version` is `complete` with no qualifying observation |
 | reader | `watched`: 1 issue whose key is unknown, skipped by the cap, makes every watched entry `partial`; an issue held `before_cutoff` gets no event request and holds no watched entry `partial` |
