@@ -223,11 +223,14 @@ report comes. `complete` means all 3 of these hold:
 
 - the issue list was read in full (every page);
 - every GlitchTip issue known to map to that key (`health.json` `issue_keys`, or
-  the key's `glitchtip_issue_ids` in `published.json`) was read in full for the
-  last 30 days with every source check run;
+  the key's `glitchtip_issue_ids` in `published.json`, or the key that this run
+  learned) was read in full for the last 30 days with every source check run;
 - every issue of the list whose key is still unknown at the end of the run was
   read far enough to learn its key, except the issues held `before_cutoff`,
-  which take no part ([Reader](#reader) step 2).
+  which take no part ([Reader](#reader) step 2). An issue with no valid report
+  in its last 30 days gives its key from its newest older event; an issue that
+  was read in full and holds no valid report at all cannot hold a qualifying
+  observation, so it does not make the entry `partial`.
 
 Else the entry is `partial`, including when `run.status` is not `ok` or an issue
 of that key was held `source_unavailable` or `request_cap`. So an issue that the
@@ -252,7 +255,9 @@ also of a held issue.
 | `source_unavailable` | a git, registry or index read failed |
 | `request_cap` | the load cap or the deadline stopped the read of that issue |
 
-A held count counts problems (GlitchTip issues), never events.
+A held count counts problems (GlitchTip issues), never events: a held key
+adds the number of its GlitchTip issues, and an issue held `before_cutoff` or
+not reached (`request_cap`) adds 1.
 
 **Forbidden key names at any depth:** `report_id`, `event_id`, `eventID`,
 `week`, `client`, `count`, `retries`. An unknown key, a value outside its
@@ -350,8 +355,10 @@ word `frostyard` keeps free text out of a public issue.
    (`GET /api/0/issues/{id}/events/?full=true`, newest first, every page until
    an event older than 30 days). The load cap: at most 1000 GlitchTip requests
    a run, a pause of 200 ms between requests, 20 seconds for each request and
-   15 minutes for the run. An issue whose read the cap cuts gets `coverage`
-   `partial`; an issue not reached is held `request_cap`.
+   15 minutes for the run. The 15 minutes cover the source checks of step 6
+   too: a key whose checks the deadline stops is held `request_cap`. An issue
+   whose read the cap cuts gets `coverage` `partial`; an issue not reached is
+   held `request_cap`.
 5. **Each event alone.** From an event's tags and `extra.detail` the reader
    rebuilds the report fields and computes the problem key
    ([Problem key](#problem-key-and-published-forms)). An event whose raw
@@ -444,8 +451,8 @@ registry and index reads are anonymous.
 | `image.version`, `target_version`, `newer_version` | the tag exists in `ghcr.io/frostyard/<image.id>` (registry `tags/list`); order is numeric | as above |
 | sysext `version` | a file `<feature>_<version>_…` is listed in `https://repository.frostyard.org/ext/<feature>/SHA256SUMS`, the index that the feature's `.transfer` file reads | `feature_version` is dropped from that observation |
 | `code` | the literal `"<code>"` (with the quotes) is in the repository at the tag of that observation's `app_version` (`git grep -F`) | that observation is dropped |
-| `frames` | the frame rule below, at the tag of that observation's `app_version`; a tag that cannot be read holds the problem `source_unavailable` | that observation is dropped |
-| `location` | the file exists at that version's tag and has at least that many lines | that observation is dropped |
+| `frames` | the frame rule below, at the tag of that observation's `app_version`; a tag that cannot be read holds the problem `source_unavailable`. Each observation also needs at least 1 verified frame of the routed module among its first 32 frames, so a forged newer event cannot hold a real 1 back by being the representative event | that observation is dropped |
+| `location` | the file exists at that version's tag and has at least that many lines; the path is relative to the repository root or to the folder of a `Cargo.toml` at that tag (a Rust panic location is relative to its crate, such as `app/src-tauri/`) | that observation is dropped |
 | the shown frames after the first 3 | the frame rule below, at the tag of the representative event's `app_version` | the frame is shown as `unverified`; a problem with no verified frame of the routed module among its shown frames is held `unverified_code` |
 | `unit` | in `triage/allow/units.txt` | held `not_allowlisted` |
 | `feature` | in `triage/allow/features.txt` | held `not_allowlisted` |
@@ -577,12 +584,13 @@ A frame of another `github.com/frostyard/` module goes out as `frostyard`
 | Case | `run.status` | Exit | Effect |
 | --- | --- | --- | --- |
 | The token file is missing, unreadable or malformed | `config` | 2 | no request |
-| A `TRIAGE_*` override without `TRIAGE_TEST=1`, or a test URL on another host | `config` | 2 | no request |
+| A `TRIAGE_*` override without `TRIAGE_TEST=1`, or a test URL on another host | `config` | 2 | no request, and no file is written: the state folder is not known then, and a test never writes the production state |
 | `401` or `403` | `auth` | 3 | the run stops |
 | A network error, a timeout, a `5xx`, or a `429` after 1 wait (`Retry-After`, at most 60 seconds) | `unreachable` | 4 | the run stops |
 | A `3xx` (a redirect is never followed), malformed JSON, or an unexpected shape | `error` | 5 | the run stops |
 | A git, registry or index read fails | `ok` | 0 | that problem is held `source_unavailable`, its `coverage` `partial` |
-| The 15-minute deadline | `partial` | 0 | the rest is held `request_cap` |
+| The 15-minute deadline, or the load cap of 1000 requests | `partial` | 0 | the rest is held `request_cap` |
+| A `404` on the events of 1 issue (the issue was deleted during the run) | unchanged | unchanged | that issue is skipped |
 
 Diagnostics on stdout and stderr are fixed strings with a reason code. They
 MUST NOT print a report value, a token, a URL query or a response body.
@@ -840,7 +848,8 @@ and GlitchTip's status stays as GlitchTip sets it.
 7. `facts.json` is written through a temporary file in the same folder and then
    renamed.
 8. A run that fails still writes `facts.json`, with its `run.status` and no
-   problems.
+   problems, except a refused `TRIAGE_*` override, which writes no file
+   ([Failures](#failures)).
 9. Only the fields of [Public fields](#public-fields) reach a public text.
 10. The fair order of the reader and the order of a deferral are the same
     order.

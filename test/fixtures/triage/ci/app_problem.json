@@ -1,0 +1,20 @@
+{
+  "schema": "frostyard.problem/1",
+  "report_id": "00000000-0000-4000-8000-000000000000",
+  "week": "2026-W45",
+  "image": {
+    "id": "snow",
+    "version": "20261031093822"
+  },
+  "secure": false,
+  "client": "chairlift/0.14.0",
+  "kind": "app_problem",
+  "detail": {
+    "app_id": "org.frostyard.ChairLift",
+    "app_version": "0.14.0",
+    "runtime": "go",
+    "component": "gui",
+    "class": "error",
+    "code": "store.migrate_failed"
+  }
+}
