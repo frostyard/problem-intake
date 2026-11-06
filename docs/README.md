@@ -8,9 +8,13 @@ Docs are split by the question they answer:
 | [design/](design/) | **How** does it fit together? | Living documents describing the current architecture |
 | [specs/](specs/) | **What exactly** is the contract? | Precise, testable interface definitions |
 | [plans/](plans/) | **When/in what order** do we build? | Roadmaps and phase plans; updated as work lands |
-| [runbook/](runbook/) | **How do I operate it?** | Host steps for Brian and the operators |
+| [runbook/](runbook/) | **How do I operate it?** | Host steps for the operators |
 
 ## Index
+
+### Org decisions
+
+- [Org-wide decisions (frostyard/core ADRs)](org-adrs.md)
 
 ### Decisions (ADRs)
 
@@ -32,7 +36,7 @@ Docs are split by the question they answer:
 
 ### Plans
 
-*(none yet: the plan is frostyard plan T857, task t15)*
+*(none yet)*
 
 ### Runbooks
 

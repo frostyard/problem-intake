@@ -97,10 +97,15 @@ test("workflows: SHA pins, no top-level permissions, no persisted credentials", 
 });
 
 test("the canonical instruction file has its aliases", () => {
-  for (const alias of ["CLAUDE.md", "GEMINI.md"]) {
+  assert.ok(lstatSync(join(root, "AGENTS.md")).isFile(), "AGENTS.md is not a regular file");
+  assert.ok(!lstatSync(join(root, "AGENTS.md")).isSymbolicLink(), "AGENTS.md is a symlink");
+  for (const alias of [".cursorrules", "CLAUDE.md", "GEMINI.md"]) {
     assert.ok(lstatSync(join(root, alias)).isSymbolicLink(), `${alias} is not a symlink`);
     assert.equal(readlinkSync(join(root, alias)), "AGENTS.md");
   }
+  const copilot = join(root, ".github/copilot-instructions.md");
+  assert.ok(lstatSync(copilot).isSymbolicLink(), ".github/copilot-instructions.md is not a symlink");
+  assert.equal(readlinkSync(copilot), "../AGENTS.md");
 });
 
 test("every doc is in the docs index, and every index link exists", () => {

@@ -1,23 +1,33 @@
+<!-- readme-kind: service -->
 # problem-intake
 
-Opt-in problem report intake Worker (plan T857).
+problem-intake is the Cloudflare Worker at `https://report.frostyard.org`. It
+takes opt-in problem reports from frostyard images, checks each one against
+the schema `frostyard.problem/1`, drops the client address and forwards each
+problem to a self-hosted GlitchTip. It publishes weekly aggregates with small
+cells suppressed.
 
-frostyard images send problem reports only after the user (chairlift) or the
-admin (Floe's `snosi-health`) opts in. This repository holds the Cloudflare
-Worker at `https://report.frostyard.org` that takes them, the weekly
-aggregation, and the GlitchTip Compose file and runbooks for the store on
-Brian's homelab.
+It also holds the GlitchTip Compose file and its runbooks. The decision behind
+it is frostyard/core
+[ADR-0069](https://github.com/frostyard/core/blob/main/docs/adr/0069-report-problems-local-first-opt-in-with-one-sender-per-host.md)
+and this repository's
+[ADR-0003](docs/adr/0003-intake-worker-validates-strips-and-forwards.md).
 
-- Decision: frostyard/core
-  [ADR-0069](https://github.com/frostyard/core/blob/main/docs/adr/0069-report-problems-local-first-opt-in-with-one-sender-per-host.md)
-  (local first, opt-in, one sender per host) and this repository's
-  [ADR-0003](docs/adr/0003-intake-worker-validates-strips-and-forwards.md).
-- Schema: `frostyard.problem/1`, frostyard/core
-  [problem-report.md](https://github.com/frostyard/core/blob/main/docs/specs/problem-report.md);
-  [schema/v1.json](schema/v1.json) is its byte copy.
-- Design: [docs/design/intake.md](docs/design/intake.md).
+**Status:** in production.
 
-## Endpoints
+**Documentation:** [docs/README.md](docs/README.md)
+
+## What it does
+
+- **Validate and strip.** A report must pass the closed schema: enums, patterns, the app ID allowlist, and no free text. The Worker forwards schema values only ([schema](schema/v1.json), [design](docs/design/intake.md)).
+- **Forward to GlitchTip.** The outgoing request is new, with 3 headers and 1 event whose ID is the `report_id`; no tag holds the `report_id` ([ADR-0005](docs/adr/0005-the-worker-sends-no-report-id-tag.md)).
+- **Publish weekly aggregates.** A Monday cron reads the previous ISO week and serves 3 tables, with cells of 1 to 4 and their complements suppressed ([spec](docs/specs/stats.md), [suppression](src/suppress.ts)).
+- **Report health.** `GET /v1/health` shows forward failures of the last hour and day ([operational notes](docs/design/intake.md#operational-notes)).
+- **Delete 1 report.** A report is deleted by its `report_id` ([runbook](docs/runbook/glitchtip.md#delete-1-report)).
+- **Stop intake.** The `KILL_SWITCH` var makes the Worker answer 503 with `Retry-After: 86400`, so senders keep their items for the next day ([kill switch](docs/runbook/deploy.md#kill-switch)).
+- **Rate limit.** A Workers rate-limit binding caps each address at 10 reports in 60 seconds ([API spec](docs/specs/intake-api.md)).
+
+## Interface
 
 | Endpoint | What it does |
 | --- | --- |
@@ -30,7 +40,18 @@ Contracts: [intake API](docs/specs/intake-api.md),
 [Analytics Engine points](docs/specs/analytics-points.md),
 [aggregates](docs/specs/stats.md).
 
-## Privacy rules
+## Deploy
+
+The Worker deploys from `main` by
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml), which runs on a
+push that changes the Worker (`src/`, `schema/`, `wrangler.jsonc`, the npm
+manifests or the workflow), and by hand; no workstation deploys. GlitchTip runs on TrueNAS from
+[`glitchtip/compose.yaml`](glitchtip/compose.yaml), whose images are pinned by
+tag and digest. The host steps are in the [deploy
+runbook](docs/runbook/deploy.md) and the [GlitchTip
+runbook](docs/runbook/glitchtip.md).
+
+## Privacy
 
 - The Worker never stores, logs or forwards the client IP. It reads
   `CF-Connecting-IP` only as the key of the Workers rate-limit binding
@@ -38,12 +59,10 @@ Contracts: [intake API](docs/specs/intake-api.md),
   data.
 - Observability, logs, traces and Logpush are off; the source has no
   `console` call.
-- Every document must pass the schema: closed shape, enums, patterns and the
-  app ID allowlist; no free text.
 - GlitchTip gets each problem with the `report_id` as its event ID and in no
-  tag, `user.ip_address` null and no `server_name`. `count` reports never go to GlitchTip. GlitchTip's
-  retention is 72 days: with its partition cleanup and 7 days of snapshots,
-  data lives at most about 88 days, under 90 days
+  tag, `user.ip_address` null and no `server_name`. `count` reports never go to
+  GlitchTip. Its retention is 72 days: with its partition cleanup and 7 days of
+  snapshots, data lives at most about 88 days, under 90 days
   ([runbook](docs/runbook/glitchtip.md#retention)).
 - Public statistics are aggregates only. A cell from 1 to 4 is never
   published, and complementary cells are suppressed so that no small value
@@ -51,29 +70,27 @@ Contracts: [intake API](docs/specs/intake-api.md),
 - A report can be deleted by its `report_id`
   ([runbook](docs/runbook/glitchtip.md#delete-1-report)).
 
-**Known limit.** The plan asks for about 10 reports a minute and 100 a day
-for each IP. The Worker enforces 10 in 60 seconds: a rate-limit binding
-counts only over 10 or 60 seconds, and a daily limit needs a stored key
-derived from the IP, which the Worker does not keep. The schema and each
-sender's own cap (20 reports a day, 1 count a week) bound the rest.
+## Limits
 
-## Test
+- **The daily rate limit is not enforced.** The Worker enforces 10 reports in
+  60 seconds for each address; a daily limit would need a stored key derived
+  from the IP, which the Worker does not keep. The schema and each sender's own
+  cap (20 reports a day, 1 count a week) bound the rest
+  ([known limits](docs/design/intake.md#known-limits)).
+
+## Develop
 
 ```sh
-mise install         # Node 24
+mise install   # Node 24
 npm ci
 make ci BASE=origin/main
 ```
 
-`make check` runs the typecheck, the validator drift check, the node tests,
-vitest with coverage in workerd (GlitchTip and the SQL API are mocked), and
-`wrangler deploy --dry-run`. The GlitchTip CI job starts the Compose stack,
-proves the deletion runbook, and proves the nightly cleanup
-(`scripts/glitchtip-cleanup-proof.sh`).
+That is the gate CI runs; [AGENTS.md](AGENTS.md) says what each target does.
 
-## Operate
+## Where to go next
 
-- [Deploy the Worker](docs/runbook/deploy.md): Brian's host steps (KV
-  namespace, GitHub environment, Worker secrets, zone settings).
-- [GlitchTip on TrueNAS](docs/runbook/glitchtip.md): install, retention,
-  updates, monitoring, deletion of 1 report, kill switch.
+- [AGENTS.md](AGENTS.md): the commands, the rules and the privacy hard rules.
+- [docs/README.md](docs/README.md): the decisions, the design, the specs and the runbooks.
+- [SECURITY.md](SECURITY.md): report a vulnerability privately.
+- [LICENSE](LICENSE): MIT.

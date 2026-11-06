@@ -6,9 +6,9 @@ each problem to a self-hosted GlitchTip, and publishes weekly aggregates with
 small cells suppressed. It also holds the GlitchTip Compose file and its
 runbooks. Owner: Murbella. Start at [docs/README.md](docs/README.md).
 
-This file (`AGENTS.md`) is the CANONICAL agent instructions — `CLAUDE.md`,
-`GEMINI.md`, and `.github/copilot-instructions.md` are symlinks to it, and
-`.claude/skills` symlinks to `.agents/skills/`
+This file (`AGENTS.md`) is the CANONICAL agent instructions — `.cursorrules`,
+`CLAUDE.md`, `GEMINI.md`, and `.github/copilot-instructions.md` are symlinks
+to it, and `.claude/skills` symlinks to `.agents/skills/`
 ([ADR-0002](docs/adr/0002-agent-portable-instruction-surface.md)). Edit only
 the canonical paths; keep content tool-agnostic.
 
