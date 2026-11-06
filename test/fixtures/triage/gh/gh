@@ -2,7 +2,9 @@
 // A fake `gh` for the triage tests (test/node/triage-*.test.mjs). It answers
 // from a JSON state file named by FAKE_GH_STATE and appends every call to it,
 // so a test can see the calls of a run. No network, no wall clock: the state
-// file holds every issue, comment, release, label and compare answer.
+// file holds every issue, comment, release, label and compare answer, and the
+// switches of a test: `searchTotalCount`, `searchIncomplete`, `searchOverlap`,
+// `graphqlErrors`, `failCommentPost`, `failReopen`, `slowPath` and `slowMs`.
 //
 // Paths: `api repos/...`, `api graphql`, and `search issues`.
 import { readFileSync, writeFileSync, writeSync } from "node:fs";
@@ -174,6 +176,12 @@ if (argv[0] !== "api") fail(404, "Not Found");
 
 let at = 1;
 const path = argv[at];
+
+// `slowPath` makes 1 path wait, for the timeout test: no network, no sleep in
+// the job's own code.
+if (typeof state.slowPath === "string" && String(path).includes(state.slowPath)) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(state.slowMs ?? 2000));
+}
 at += 1;
 let method = "GET";
 let input = null;
@@ -262,11 +270,14 @@ if (path === "search/issues") {
     }
   }
   const size = Number.isSafeInteger(perPage) && perPage > 0 ? perPage : 30;
+  // `searchOverlap` repeats the last item of the page before, for the identity
+  // test of the rebuild.
+  const start = Math.max(0, (page - 1) * size - (state.searchOverlap === true && page > 1 ? 1 : 0));
   save(state);
   answer({
     total_count: Number.isSafeInteger(state.searchTotalCount) ? state.searchTotalCount : hits.length,
     incomplete_results: state.searchIncomplete === true,
-    items: hits.slice((page - 1) * size, page * size),
+    items: hits.slice(start, start + size),
   });
 }
 

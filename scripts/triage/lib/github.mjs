@@ -37,11 +37,19 @@ export class GitHubError extends Error {
 
 const MAX_BUFFER = 32 * 1024 * 1024;
 const MAX_CALL_MS = 60_000;
-const MIN_CALL_MS = 1_000;
 const HEALTH_RESERVE_MS = 60_000;
 const SEARCH_PER_PAGE = 100;
 const SEARCH_MAX_TOTAL = 1000;
 const SEARCH_MAX_PAGES = 11;
+
+// The identity of 1 `search/issues` item: its repository and its number.
+function issueIdentity(item) {
+  const url = typeof item?.repository_url === "string" ? item.repository_url : null;
+  const match = url === null ? null : /\/repos\/([^/]+\/[^/]+)$/.exec(url);
+  if (match === null) return null;
+  if (!Number.isSafeInteger(item?.number)) return null;
+  return `${match[1]}#${item.number}`;
+}
 
 function parseOutput(text, code) {
   const trimmed = String(text ?? "").trim();
@@ -87,8 +95,9 @@ export function createGitHub({ env = process.env, limit = 150, softLimit = limit
   function callTimeout() {
     if (deadlineAt === null) return MAX_CALL_MS;
     const left = deadlineAt - now() + (reserve ? HEALTH_RESERVE_MS : 0);
+    // At or below 0 no call starts: the gate stops the work.
     if (left <= 0) throw new DeadlineError();
-    return Math.max(MIN_CALL_MS, Math.min(MAX_CALL_MS, left));
+    return Math.min(MAX_CALL_MS, left);
   }
 
   function spawnCall(args, input) {
@@ -106,7 +115,12 @@ export function createGitHub({ env = process.env, limit = 150, softLimit = limit
         timeout,
       });
     } catch (error) {
-      if (error?.signal !== undefined && error?.signal !== null) throw new GitHubError("timeout");
+      if (error?.signal !== undefined && error?.signal !== null) {
+        // A call killed at the remaining work time is the deadline, not a
+        // failure; only the 60 second cap is a timeout of `gh`.
+        if (timeout < MAX_CALL_MS) throw new DeadlineError();
+        throw new GitHubError("timeout");
+      }
       const stderr = String(error?.stderr ?? "");
       const match = /HTTP ([0-9]{3})/.exec(stderr);
       if (match !== null) throw new GitHubError("http", Number(match[1]));
@@ -187,6 +201,10 @@ export function createGitHub({ env = process.env, limit = 150, softLimit = limit
   // leaves hits unread, or a page the gate stopped.
   function searchIssuePages(query, { maxItems = SEARCH_MAX_TOTAL, gate = null } = {}) {
     const items = [];
+    // The identity of an issue: its repository and its number. A page that
+    // repeats 1 of them, or a total_count that moves, makes the read
+    // incomplete: the hit count and the items no longer agree.
+    const seen = new Set();
     let totalCount = 0;
     for (let page = 1; page <= SEARCH_MAX_PAGES; page += 1) {
       if (gate !== null && !gate()) return null;
@@ -202,16 +220,25 @@ export function createGitHub({ env = process.env, limit = 150, softLimit = limit
       }
       if (answer === null || !Array.isArray(answer.items)) return null;
       if (answer.incomplete_results === true) return null;
+      const seenCount = Number(answer.total_count ?? 0);
       if (page === 1) {
-        totalCount = Number(answer.total_count ?? 0);
+        totalCount = seenCount;
         if (!Number.isSafeInteger(totalCount) || totalCount < 0 || totalCount > maxItems) return null;
+      } else if (seenCount !== totalCount) {
+        // GitHub's hit count moved under the pages: they are no 1 list.
+        return null;
       }
-      items.push(...answer.items);
-      if (items.length >= totalCount) break;
+      for (const item of answer.items) {
+        const id = issueIdentity(item);
+        if (id === null || seen.has(id)) return null;
+        seen.add(id);
+        items.push(item);
+      }
+      if (seen.size >= totalCount) break;
       if (answer.items.length < SEARCH_PER_PAGE) break;
     }
-    // A short page, or the page cap, left hits unread: the read is incomplete.
-    if (items.length < totalCount) return null;
+    // A short page, the page cap or an identity gap left hits unread.
+    if (seen.size < totalCount) return null;
     return { items, totalCount };
   }
 

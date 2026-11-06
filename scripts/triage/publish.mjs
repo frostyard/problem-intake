@@ -53,6 +53,8 @@ const DAY = /\d{4}-\d{2}-\d{2}/;
 // The fixed count of the spec's own step text, not a value of a report.
 const FIXED_COUNTS = Object.freeze([`${COVERED_DAYS} covered days`]);
 const REPO_URL = /^https:\/\/api\.github\.com\/repos\/(frostyard\/[A-Za-z0-9._-]+)$/;
+// The calls the health phase keeps for the issue lookup and the body patch.
+const NOTIFICATION_RESERVE = 2;
 const REBUILD_QUERY = '"Problem key:" org:frostyard author:frostyard-machines label:problem-report is:issue';
 const RELEASES_PAGE = 100;
 const MAX_RELEASE_PAGES = 50;
@@ -278,21 +280,21 @@ async function endRun(run, facts) {
   const rotationDue =
     facts.run.token_age_days === null ? previous?.rotation_due === true : facts.run.token_age_days >= ROTATION_DAY;
 
-  // 1. Each transition of this run becomes a pending notification, and it is
-  //    written before any comment: a crash repeats no comment, and a retry
-  //    finds the pending entry again.
-  const wanted = [];
+  // 1. The checkpoint: the transitions of this run and THIS run's entry go out
+  //    in 1 write, before any comment. A retry then sees this run's status as
+  //    `previous`, so it never detects the same transition again.
   if (previous !== null && previous.status === "ok" && status !== "ok") {
-    wanted.push(`The triage job run status changed from ok to ${status}.`);
+    run.health.notifications.push({
+      id: health.newNotificationId(),
+      text: `The triage job run status changed from ok to ${status}.`,
+      since: run.today,
+    });
   }
-  if (rotationDue && previous?.rotation_due !== true) wanted.push(health.ROTATION_TEXT);
-  let added = false;
-  for (const text of wanted) {
-    if (run.health.notifications.some((entry) => entry.text === text)) continue;
-    run.health.notifications.push({ id: health.newNotificationId(), text, since: run.today });
-    added = true;
+  if (rotationDue && previous?.rotation_due !== true) {
+    run.health.notifications.push({ id: health.newNotificationId(), text: health.ROTATION_TEXT, since: run.today });
   }
-  if (added) health.writeHealth(run.dir, run.health);
+  run.health.runs.push(runEntryOf(run, facts, rotationDue));
+  health.writeHealth(run.dir, run.health);
 
   // 2. The health issue, so the pending notifications have a place.
   let issue = await health.findHealthIssue(run.github);
@@ -302,43 +304,53 @@ async function endRun(run, facts) {
     run.hooks.afterAction?.("health-create");
   }
 
-  // 3. Deliver each pending notification once.
+  // 3. Deliver each pending notification once, and keep 2 calls for the body.
   await deliverNotifications(run, issue);
 
-  // 4. The run entry and the body, with the deferrals of the whole run.
-  const entry = health.runEntry({
-    day: run.today,
-    status,
-    notes: facts.run.notes,
-    held: facts.held,
-    deferred: run.deferred,
-    rotationDue,
-  });
+  // 4. The final entry replaces the checkpoint, with every deferral of the
+  //    run, and the body follows it.
+  const entry = runEntryOf(run, facts, rotationDue);
+  run.health.runs[run.health.runs.length - 1] = entry;
   const body = health.healthBody({ status, notes: facts.run.notes, rotationDue, deferred: entry.deferred });
   assertPublicText(body, { noDigits: true });
   if (issue.body !== body) {
     await health.setIssueBody(run.github, health.HEALTH_REPO, issue.number, body);
     run.hooks.afterAction?.("health-body");
   }
-
-  run.health.runs.push(entry);
   health.writeHealth(run.dir, run.health);
   health.writeHeartbeat(run.dir, run.today);
   return 0;
 }
 
+// The run entry of this moment: the deferrals are the ones known now.
+function runEntryOf(run, facts, rotationDue) {
+  return health.runEntry({
+    day: run.today,
+    status: facts.run.status,
+    notes: facts.run.notes,
+    held: facts.held,
+    deferred: run.deferred,
+    rotationDue,
+  });
+}
+
 // Each pending notification is 1 comment whose first line is its id. An entry
 // leaves health.json only after its comment is on the issue, so a crash
-// between the 2 writes repeats no comment.
+// between the 2 writes repeats no comment. The notification work stops while
+// 2 calls are left, so the issue lookup and the body patch always have calls.
 async function deliverNotifications(run, issue) {
   for (const notification of [...run.health.notifications]) {
     if (!gate(run)) {
       defer(run, run.stopped ?? "deadline");
       return;
     }
+    if (run.github.remaining() <= NOTIFICATION_RESERVE) {
+      defer(run, "budget");
+      return;
+    }
     const marker = health.notificationMarker(notification.id);
     const comments = await health.commentsSince(run.github, issue.number, `${notification.since}T00:00:00Z`, {
-      gate: () => gate(run),
+      gate: () => gate(run) && run.github.remaining() > NOTIFICATION_RESERVE,
       pages: Number.isSafeInteger(run.hooks.commentPages) ? run.hooks.commentPages : health.COMMENT_PAGES,
     });
     if (comments === null) {
@@ -347,13 +359,12 @@ async function deliverNotifications(run, issue) {
       return;
     }
     if (!health.hasMachineMarkerLine(comments, marker)) {
+      if (run.github.remaining() <= NOTIFICATION_RESERVE) {
+        defer(run, "budget");
+        return;
+      }
       assertPublicText(notification.text, { fixed: FIXED_COUNTS });
-      await health.createComment(
-        run.github,
-        health.HEALTH_REPO,
-        issue.number,
-        `${marker}\n\n${notification.text}`,
-      );
+      await health.createComment(run.github, health.HEALTH_REPO, issue.number, `${marker}\n\n${notification.text}`);
       run.hooks.afterAction?.(notification.text === health.ROTATION_TEXT ? "health-rotation" : "health-comment");
     }
     run.health.notifications = run.health.notifications.filter((entry) => entry.id !== notification.id);

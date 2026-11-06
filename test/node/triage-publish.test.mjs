@@ -2849,7 +2849,9 @@ test("a rotation comment that crashed is not written twice the next day", async 
   assert.equal(await run(world, { hooks: crash }), 1);
   assert.equal(commentPosts(world).length, 1);
   assert.equal(readHealth(world).notifications.length, 1);
-  assert.equal(readHealth(world).runs.length, 0);
+  // The checkpoint of the crashed run is already the run entry.
+  assert.equal(readHealth(world).runs.length, 1);
+  assert.equal(readHealth(world).runs.at(-1).rotation_due, true);
 
   // The next day, the pending entry is still there and its comment is found.
   resetCalls(world);
@@ -2981,4 +2983,187 @@ test("an image tag with no source commit makes the key wait", async () => {
   assert.equal(readPublished(world).keys[KEY].state, "merged");
   assert.deepEqual(commentPosts(world), []);
   assert.equal(readHealth(world).runs.at(-1).deferred.recovery > 0, true);
+});
+
+// ---------------------------------------------------------------------------
+// The blocking points of re-review 3
+// ---------------------------------------------------------------------------
+
+test("a crash after a delivered notification sends no second comment", async () => {
+  const world = makeWorld({ labels: {} });
+  // The health issue exists with an old body, so the final body is a patch.
+  addIssue(world, "frostyard/problem-intake", {
+    number: 1,
+    title: "Problem triage health",
+    body: "Operational status of the problem-intake triage job.",
+    labels: ["problem-report"],
+    comments: [],
+  });
+  writeHealthFile(world, {
+    schema: "frostyard.problem-triage-health/1",
+    runs: [{ day: "2026-11-20", status: "ok", notes: [], held: {}, deferred: {}, rotation_due: false }],
+    notifications: [],
+    last_read: {},
+    issue_keys: {},
+  });
+  writeFacts(world, factsDoc({ status: "auth" }));
+  const crash = {
+    afterAction(name) {
+      if (name === "health-body") throw new Error("crash after the body patch");
+    },
+  };
+
+  // The notification was delivered; the crash comes after it.
+  assert.equal(await run(world, { hooks: crash }), 1);
+  assert.equal(commentPosts(world).length, 1);
+  assert.deepEqual(readHealth(world).notifications, []);
+  // The checkpoint already holds this run's status.
+  assert.equal(readHealth(world).runs.at(-1).status, "auth");
+
+  // A retry the same day, and 1 the next day, detect no transition.
+  resetCalls(world);
+  assert.equal(await run(world), 0);
+  assert.deepEqual(commentPosts(world), []);
+
+  writeFacts(world, factsDoc({ day: "2026-11-22", status: "auth" }));
+  resetCalls(world);
+  assert.equal(await run(world, { now: "2026-11-22T06:15:00Z" }), 0);
+  assert.deepEqual(commentPosts(world), []);
+  assert.equal(commentBodies(world, "frostyard/problem-intake", 1).length, 1);
+});
+
+test("the notification work leaves 2 calls for the body, and the next run delivers it", async () => {
+  const world = makeWorld({ labels: {} });
+  // 350 comments: the read needs 4 pages, so the post would take the reserve.
+  const comments = [];
+  for (let i = 0; i < 350; i += 1) {
+    comments.push({ author: "a-drive-by", association: "NONE", body: `chatter ${i}`, createdAt: "2026-11-21T10:00:00Z" });
+  }
+  addIssue(world, "frostyard/problem-intake", {
+    number: 1,
+    title: "Problem triage health",
+    body: "Operational status of the problem-intake triage job.",
+    labels: ["problem-report"],
+    comments,
+  });
+  writeHealthFile(world, {
+    schema: "frostyard.problem-triage-health/1",
+    runs: [{ day: "2026-11-20", status: "ok", notes: [], held: {}, deferred: {}, rotation_due: false }],
+    notifications: [],
+    last_read: {},
+    issue_keys: {},
+  });
+  writeFacts(world, factsDoc({ status: "auth" }));
+
+  // 8 calls: the rebuild page, the issue lookup, 4 comment pages, then the 2
+  // calls of the reserve for the body patch.
+  assert.equal(await run(world, { hooks: { limit: 8 } }), 0);
+  assert.deepEqual(commentPosts(world), []);
+  assert.equal(readHealth(world).notifications.length, 1);
+  assert.ok(readHealth(world).runs.at(-1).deferred.budget > 0);
+  // The body and the heartbeat are written, with the deferral in the body.
+  const issue = ghState(world).repos["frostyard/problem-intake"].issues[0];
+  assert.ok(issue.body.includes("- work deferred: yes"), issue.body);
+  assert.equal(readHeartbeat(world), DAY);
+  assert.equal(ghState(world).calls.length <= 8, true);
+
+  // The next run delivers the notification once.
+  resetCalls(world);
+  assert.equal(await run(world), 0);
+  assert.equal(commentPosts(world).length, 1);
+  assert.deepEqual(readHealth(world).notifications, []);
+});
+
+test("a search page that repeats an issue is no rebuild", async () => {
+  const world = makeWorld({ labels: { "frostyard/snosi": ["problem-report"] } });
+  seedJobIssues(world, 250);
+  // The second page starts 1 item early: its first issue was already read.
+  const state = ghState(world);
+  state.searchOverlap = true;
+  writeGh(world, state);
+  writeFacts(world, factsDoc({}));
+
+  assert.equal(await run(world), 0);
+  assert.equal(existsSync(join(world.stateDir, "published.json")), false);
+  assert.deepEqual(calls(world, "graphql"), []);
+  assert.equal(readHealth(world).runs.at(-1).deferred.recovery, 1);
+});
+
+test("2 transitions with capped reads are both delivered once", async () => {
+  const world = makeWorld({ labels: {} });
+  // 150 comments since the run's day: every capped read is incomplete.
+  const comments = [];
+  for (let i = 0; i < 150; i += 1) {
+    comments.push({ author: "a-drive-by", association: "NONE", body: `chatter ${i}`, createdAt: "2026-11-21T10:00:00Z" });
+  }
+  addIssue(world, "frostyard/problem-intake", {
+    number: 1,
+    title: "Problem triage health",
+    body: "Operational status of the problem-intake triage job.",
+    labels: ["problem-report"],
+    comments,
+  });
+  writeHealthFile(world, {
+    schema: "frostyard.problem-triage-health/1",
+    runs: [{ day: "2026-11-20", status: "ok", notes: [], held: {}, deferred: {}, rotation_due: false }],
+    notifications: [],
+    last_read: {},
+    issue_keys: {},
+  });
+  const capped = { hooks: { commentPages: 1 } };
+
+  // ok, auth, ok, auth: 2 transitions, and neither can be delivered yet.
+  for (const status of ["ok", "auth", "ok", "auth"]) {
+    writeFacts(world, factsDoc({ status }));
+    assert.equal(await run(world, capped), 0);
+  }
+  assert.deepEqual(commentPosts(world), []);
+  assert.equal(readHealth(world).notifications.length, 2);
+  assert.notEqual(readHealth(world).notifications[0].id, readHealth(world).notifications[1].id);
+
+  // A complete read delivers both, each once.
+  assert.equal(await run(world), 0);
+  const statusComments = commentBodies(world, "frostyard/problem-intake", 1).filter((body) =>
+    body.includes("changed from ok to auth"),
+  );
+  assert.equal(statusComments.length, 2);
+  assert.notEqual(statusComments[0], statusComments[1], "each notification has its own id");
+  assert.deepEqual(readHealth(world).notifications, []);
+
+  resetCalls(world);
+  assert.equal(await run(world), 0);
+  assert.deepEqual(commentPosts(world), []);
+});
+
+test("a work call killed at the remaining work time defers the deadline", async () => {
+  const world = makeWorld({ labels: { "frostyard/chairlift": ["problem-report"] } });
+  const problem = appProblem();
+  setupTracked(world, problem, {
+    repo: "frostyard/chairlift",
+    closed: true,
+    stateReason: "COMPLETED",
+    closedAt: "2026-11-20T00:00:00Z",
+    closer: { type: "PullRequest", sha: "fix1" },
+  });
+  setRelease(world, "frostyard/chairlift", [
+    { tag_name: "v0.15.0", published_at: "2026-11-20T12:00:00Z", draft: false, prerelease: false },
+  ]);
+  writeFacts(world, factsDoc({ problems: [] }));
+  // The releases call answers after 3 seconds; the work time left is 1.5.
+  const state = ghState(world);
+  state.slowPath = "releases";
+  state.slowMs = 3000;
+  writeGh(world, state);
+  let reads = 0;
+  const clock = () => {
+    reads += 1;
+    return reads === 1 ? 0 : 10 * 60 * 1000 - 1500;
+  };
+
+  assert.equal(await run(world, { hooks: { clock } }), 0);
+  const entry = readHealth(world).runs.at(-1);
+  assert.equal(entry.deferred.deadline > 0, true);
+  assert.equal(ghState(world).repos["frostyard/problem-intake"].issues.length, 1);
+  assert.equal(readHeartbeat(world), DAY);
+  assert.equal(readPublished(world).keys[KEY].state, "merged");
 });
