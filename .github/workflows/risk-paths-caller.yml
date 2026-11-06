@@ -19,4 +19,4 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: frostyard/core/.github/workflows/risk-paths.yml@408ec56ab05c9d40d9ea5308670e593955b34c6f
+    uses: frostyard/core/.github/workflows/risk-paths.yml@408ec56ab05c9d40d9ea5308670e593955b34c6f # frostyard/core main, 2026-11-05 (core has no release tags)

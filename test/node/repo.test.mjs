@@ -87,7 +87,12 @@ test("workflows: SHA pins, no top-level permissions, no persisted credentials", 
       const [, ref, rest] = match;
       if (ref.startsWith("./")) continue;
       assert.match(ref, /@[0-9a-f]{40}$/, `${path}: ${ref} is not pinned by full SHA`);
-      if (!ref.includes("/.github/workflows/")) assert.match(rest, /# v\d+\.\d+\.\d+/, `${path}: ${ref} has no # vX.Y.Z`);
+      if (ref.includes("/.github/workflows/")) {
+        // A reusable workflow of core: core has no release tags, so the comment names the branch and the commit date.
+        assert.match(rest, /# frostyard\/core main, \d{4}-\d{2}-\d{2}\b/, `${path}: ${ref} has no # frostyard/core main, YYYY-MM-DD`);
+      } else {
+        assert.match(rest, /# v\d+\.\d+\.\d+/, `${path}: ${ref} has no # vX.Y.Z`);
+      }
     }
     if (text.includes("actions/checkout@")) assert.match(text, /persist-credentials: false/, `${path}: checkout persists credentials`);
     if (text.includes("runs-on:")) assert.match(text, /timeout-minutes: \d+/, `${path}: no timeout`);
