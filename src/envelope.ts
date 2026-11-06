@@ -33,8 +33,10 @@ export function eventId(reportId: string): string {
   return reportId.replaceAll("-", "");
 }
 
-// The part of the fingerprint after kind and class.
-function groupKey(report: Report): string[] {
+// The part of the fingerprint after kind and class. Exported for the triage
+// reader (scripts/triage/read.mjs), so the problem key of the job and the
+// fingerprint of the Worker cannot differ (docs/specs/triage.md).
+export function groupKey(report: Report): string[] {
   switch (report.kind) {
     case "unit_failed":
       return [detailString(report, "unit")];
