@@ -132,12 +132,14 @@ exit 2.
 ### The verified summary
 
 ```sh
-node scripts/triage/read.mjs --summary
+/usr/local/bin/node scripts/triage/read.mjs --summary
 ```
 
 It prints the problems of the last `facts.json` (verified values only) and
 the held counts, and it sends no GlitchTip request. It is the first way for an
-agent to see a problem (`AGENTS.md`).
+agent to see a problem (`AGENTS.md`). It runs as `team` on the team VM, in the
+triage clone, by the full path that the units use
+([runbook](../runbook/triage.md#node-in-the-triage-clone)).
 
 ## The facts schema `frostyard.problem-triage-facts/1`
 
