@@ -84,7 +84,7 @@ they are written in that role, not in this repository.
 | State | `~team/.local/state/problem-triage/`, mode `0700`: `facts.json`, `published.json`, `health.json`, `heartbeat`, `cache/` |
 | `problem-triage.service` (user) | `Type=oneshot`; the 2 fetch steps; `ExecStart=-/usr/local/bin/node scripts/triage/read.mjs` (the `-` lets the publisher run when the reader fails); `ExecStart=/usr/local/bin/node scripts/triage/publish.mjs`; `TimeoutStartSec=35min` |
 | `problem-triage.timer` (user) | `OnCalendar=*-*-* 06:15:00 America/New_York`, `Persistent=true` |
-| `problem-triage-watchdog.service` and `.timer` (user) | `OnCalendar=*-*-* 12:00:00 America/New_York`; `node scripts/triage/watchdog.mjs` |
+| `problem-triage-watchdog.service` and `.timer` (user) | `OnCalendar=*-*-* 12:00:00 America/New_York`; `ExecStart=/usr/local/bin/node scripts/triage/watchdog.mjs` |
 | Flag | `problem_triage_enabled` in the fleet role `team_vm`, default false. Both timers are enabled only when it is true |
 
 06:15 plus the unit timeout ends before the 07:00 backup and the Sunday 07:00
@@ -110,9 +110,10 @@ is a backstop. Fleet's drift check reports a timer that is not in its set state.
 
 ## Operational notes
 
-- **Where to look.** On the team VM as `team`:
-  `node scripts/triage/read.mjs --summary` (the verified problems and the held
-  counts of the last run), `~/.local/state/problem-triage/facts.json`,
+- **Where to look.** On the team VM as `team`, in the clone:
+  `/usr/local/bin/node scripts/triage/read.mjs --summary` (the verified
+  problems and the held counts of the last run; the full path, as the units
+  use it: [runbook](../runbook/triage.md#node-in-the-triage-clone)), `~/.local/state/problem-triage/facts.json`,
   `~/.local/state/problem-triage/health.json`,
   `systemctl --user status problem-triage.service`, and
   `journalctl --user -u problem-triage.service`. The public health issue

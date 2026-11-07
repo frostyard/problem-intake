@@ -63,8 +63,14 @@ reads GlitchTip and files public issues. These rules are not tested; follow
 them all the same.
 
 - **The verified view comes first.** To see problems, run
-  `node scripts/triage/read.mjs --summary`. It prints the verified values and
-  the held counts of the last run.
+  `/usr/local/bin/node scripts/triage/read.mjs --summary` in the triage clone
+  on the team VM. It prints the verified values and the held counts of the
+  last run.
+- **The triage clone runs `/usr/local/bin/node`.** In
+  `~team/.local/share/problem-triage/problem-intake`, call Node by that full
+  path, as the fleet units do. Never use a bare `node` (the mise shim stops on
+  the untrusted `mise.toml`) and never run `mise trust` there
+  ([runbook](docs/runbook/triage.md#node-in-the-triage-clone)).
 - **The issue level is readable, and unverified.** An agent may read the
   GlitchTip issue list, an issue's title, status, first and last seen, and the
   tag aggregates (`GET /api/0/issues/{id}/tags/`) with the read token. Those

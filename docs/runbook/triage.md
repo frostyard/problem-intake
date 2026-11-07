@@ -110,6 +110,39 @@ apply it through the Semaphore template "Team VM configure". After the apply,
 `systemctl --user list-timers` as `team` shows `problem-triage.timer` and
 `problem-triage-watchdog.timer`.
 
+## Node in the triage clone
+
+The clone `~team/.local/share/problem-triage/problem-intake` runs with
+`/usr/local/bin/node`, by its full path. Every command that you run by hand
+there uses that path too:
+
+```sh
+cd ~/.local/share/problem-triage/problem-intake
+/usr/local/bin/node scripts/triage/read.mjs --summary
+```
+
+Do not use a bare `node` there, and do not run `mise trust` there. The reasons:
+
+- **The units use this path.** `problem-triage.service` (06:15) and
+  `problem-triage-watchdog.service` (12:00) call `/usr/local/bin/node` in each
+  `ExecStart` ([design, Host items](../design/triage.md#host-items)). A run by
+  hand with the same binary runs the same Node as the timed run.
+- **A bare `node` fails there.** On the team VM, `node` on the `PATH` of a
+  shell is the mise shim. The clone's [`mise.toml`](../../mise.toml) is not
+  trusted, so the shim stops with `Config files in ... mise.toml are not
+  trusted` and runs nothing.
+- **A trust would not last and would not match.** mise keeps its trust list in
+  `~team/.local/state/mise/`, and the backup of the team VM does not hold
+  `~team/.local/state` (see [After a rebuild](#after-a-rebuild-of-the-team-vm)),
+  so a trust is lost at the next rebuild. A trusted shim also picks Node from
+  the `mise.toml` of the `main` that the unit fetched that morning, not from
+  the binary that the units call.
+- **The scripts need no tool from mise.** The scripts under `scripts/triage/`
+  import `node:` builtins only, and the job runs no `npm`.
+
+The units are fleet's (role `team_vm`). This rule changes no unit and no
+timer.
+
 ## Rotation
 
 The token has no expiry date of its own, so the job counts its days from the
@@ -145,6 +178,8 @@ hosts and cannot change or delete an issue.
    `last_counted_day` at `null`.
 5. When 1 of those source reads fails, that key stays in recovery: no loop
    progress and no comment for it, and the next run tries again.
+6. Commands by hand in the clone still use `/usr/local/bin/node`, not
+   `mise trust` ([Node in the triage clone](#node-in-the-triage-clone)).
 
 ## Copies
 
