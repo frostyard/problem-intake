@@ -4,15 +4,30 @@
 // builder (src/envelope.ts; Node 24 strips the types), so the job tests the
 // format that production sends.
 //
-// Usage: node scripts/glitchtip-send-event.mjs <report_id>
+// Usage: node scripts/glitchtip-send-event.mjs <report_id> [report fixture]
+// The fixture path must be under test/fixtures/; with none, the job sends
+// test/fixtures/examples/unit_failed.json.
 // Environment: CI_DSN, the test project's DSN. The Worker accepts only https
 // DSNs; this test sender also accepts http on 127.0.0.1 or localhost.
 import { readFileSync } from "node:fs";
+import { resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { buildEnvelope, SENTRY_CLIENT } from "../src/envelope.ts";
+
+const root = fileURLToPath(new URL("..", import.meta.url));
+const fixtures = resolve(root, "test", "fixtures");
 
 const reportId = process.argv[2] ?? "";
 if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(reportId)) {
-  process.stderr.write("Usage: node scripts/glitchtip-send-event.mjs <report_id (lowercase UUIDv4)>\n");
+  process.stderr.write("Usage: node scripts/glitchtip-send-event.mjs <report_id (lowercase UUIDv4)> [report fixture]\n");
+  process.exit(2);
+}
+
+// A fixture outside test/fixtures/ is refused: the job sends only files of
+// this repository, and never a report of a real host.
+const fixture = resolve(root, process.argv[3] ?? "test/fixtures/examples/unit_failed.json");
+if (!fixture.startsWith(fixtures + sep)) {
+  process.stderr.write("the report fixture must be under test/fixtures/\n");
   process.exit(2);
 }
 
@@ -28,7 +43,7 @@ if (!project || !dsn.username) {
   process.exit(2);
 }
 
-const report = JSON.parse(readFileSync(new URL("../test/fixtures/examples/unit_failed.json", import.meta.url), "utf8"));
+const report = JSON.parse(readFileSync(fixture, "utf8"));
 report.report_id = reportId;
 
 // The test GlitchTip listens on 127.0.0.1:8000, whatever host the DSN names.

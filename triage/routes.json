@@ -1,0 +1,21 @@
+{
+  "schema": "frostyard.problem-triage-routes/1",
+  "app_problem": {
+    "org.frostyard.ChairLift": "frostyard/chairlift",
+    "org.frostyard.nsl": "frostyard/nsl",
+    "org.frostyard.intuneme": "frostyard/intuneme",
+    "org.frostyard.pilothouse": "frostyard/pilothouse",
+    "org.frostyard.Frostmail": "frostyard/frostmail",
+    "org.frostyard.Frostnotes": "frostyard/frostnotes",
+    "org.frostyard.Frostread": "frostyard/frostread"
+  },
+  "kinds": {
+    "unit_failed": "frostyard/snosi",
+    "update_stage_failed": "frostyard/snosi",
+    "booted_older_image": "frostyard/snosi",
+    "sysext_update_failed": "frostyard/snosi",
+    "tpm_unlock": "frostyard/snosi",
+    "integrity_error": "frostyard/snosi"
+  },
+  "not_filed": ["crash", "count"]
+}

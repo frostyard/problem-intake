@@ -108,4 +108,5 @@ cron Monday ──► SQL API ──► KV aggregates/<week>.json, aggregates/in
   [problem-report.md](https://github.com/frostyard/core/blob/main/docs/specs/problem-report.md)
 - Operations: [runbook/deploy.md](../runbook/deploy.md),
   [runbook/glitchtip.md](../runbook/glitchtip.md)
+- GlitchTip to GitHub issues: [design/triage.md](triage.md)
 - Built in: plan T857 phase 2, task t15
