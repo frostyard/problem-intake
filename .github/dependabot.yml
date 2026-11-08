@@ -2,6 +2,10 @@
 # that need updates: the actions the workflows pin (ADR-0021) and the npm
 # dependencies of the Worker and its gate.
 #
+# Each entry has 1 group with `patterns: ["*"]`, so each entry opens at most 1
+# version-update pull request for each run (ADR-0075). The group has no
+# `applies-to`, so security updates stay 1 pull request each.
+#
 # `glitchtip/compose.yaml` pins its images by tag and digest. A GlitchTip update
 # follows `docs/runbook/glitchtip.md`, so there is no `docker-compose` entry.
 version: 2
@@ -14,6 +18,9 @@ updates:
     commit-message:
       prefix: "ci"
       include: "scope"
+    groups:
+      actions:
+        patterns: ["*"]
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
@@ -23,5 +30,5 @@ updates:
       prefix: "chore"
       include: "scope"
     groups:
-      dev-dependencies:
-        dependency-type: "development"
+      npm:
+        patterns: ["*"]
