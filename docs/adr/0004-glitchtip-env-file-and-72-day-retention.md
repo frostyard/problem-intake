@@ -1,6 +1,6 @@
 # 0004 — GlitchTip reads its secrets from an env file and keeps data 72 days
 
-- **Status:** Accepted
+- **Status:** Accepted; the `worker` service superseded by [0007](0007-glitchtip-runs-as-one-all-in-one-web-service.md)
 - **Date:** 2026-11-05
 
 ## Context

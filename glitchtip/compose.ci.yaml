@@ -18,8 +18,3 @@ services:
       - "127.0.0.1:8000:8000"
     volumes: !override
       - ${CI_DATA:?}/uploads:/code/uploads
-  worker:
-    env_file: !override
-      - ${CI_DATA:?}/glitchtip.env
-    volumes: !override
-      - ${CI_DATA:?}/uploads:/code/uploads

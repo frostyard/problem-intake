@@ -24,6 +24,7 @@ Docs are split by the question they answer:
 - [0004 — GlitchTip reads its secrets from an env file and keeps data 72 days](adr/0004-glitchtip-env-file-and-72-day-retention.md)
 - [0005 — The Worker sends no report_id tag to GlitchTip](adr/0005-the-worker-sends-no-report-id-tag.md)
 - [0006 — A daily triage job files verified problems as public issues in the owner repository](adr/0006-a-triage-job-files-verified-problems-as-public-issues.md)
+- [0007 — GlitchTip runs as 1 all-in-one web service](adr/0007-glitchtip-runs-as-one-all-in-one-web-service.md)
 
 ### Design
 
