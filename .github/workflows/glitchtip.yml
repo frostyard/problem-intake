@@ -115,7 +115,7 @@ jobs:
           for _ in $(seq 1 30); do
             keys="$($COMPOSE exec -T valkey valkey-cli --scan --pattern '*vtasks_scheduler_lock*' || true)"
             if [[ -n "$keys" ]]; then
-              echo "the scheduler holds its lock"
+              echo "the scheduler holds its lock: $(wc -l <<<"$keys") key(s) match *vtasks_scheduler_lock*"
               exit 0
             fi
             sleep 2
