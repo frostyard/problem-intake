@@ -128,18 +128,26 @@ fixes it also adds a guard: a targeted test that fails without the fix, or an
 
 **Risk paths.** [.github/risk-paths.json](.github/risk-paths.json) lists the
 high-risk paths; each `why` names 1 protected boundary of
-[policies/agent-governance.json](policies/agent-governance.json). A PR that
-touches one gets `risk:high` from `.github/workflows/risk-paths-caller.yml`
-and declares tier 3; its body names each matched path and why the change is
-safe. The paths: the list, the policy, `.github/workflows/**`,
+[policies/agent-governance.json](policies/agent-governance.json). The list is
+at schema version 2 with `default_level` L3: the workflow and permission paths
+and the quality gates are L2, and release, credentials and destructive
+operations are L1. A PR that touches one gets 1 level label, `level:L1` to
+`level:L4`, and `risk:high` at L1 or L2, from core's `pr-triage` workflow
+through `.github/workflows/risk-paths-caller.yml`; it declares tier 3 and its
+body names each matched path and why the change is safe. That workflow also
+removes `ready-for-human` when the head commit moves (core ADR-0077). The
+paths: the list, the policy, `.github/workflows/**`,
 `wrangler.jsonc`, `glitchtip/compose.yaml`, `src/forward.ts`, `src/sql.ts`,
 `src/report.ts`, `scripts/glitchtip-delete-report.sh`,
 `scripts/glitchtip-cleanup-proof.sh`, `Makefile`,
 `scripts/check-*.mjs`, `scripts/lib/**`, `test/node/privacy-scan.test.mjs`.
 
 **Vendored files.** `scripts/lib/risk-paths.mjs` and
-`scripts/check-corrections.mjs` are copies from frostyard/core; never edit
-them by hand (`test/node/repo.test.mjs` pins their sha256).
+`scripts/check-corrections.mjs` are copies from frostyard/core at
+`c996ea3fb54bcf1a3c621113522213702a7673e2` (core#225); never edit them by
+hand (`test/node/repo.test.mjs` pins their sha256, and its rule C check uses
+the vendored `checkRequiredPaths`, so a version 2 glob that matches the list
+or the caller must be L1 or L2).
 
 ## Repository boundary
 

@@ -1,22 +1,25 @@
-# Risk paths caller (core ADR-0068, docs/specs/risk-paths.md): runs core's
-# reusable risk-paths workflow on every pull request to add the label
-# risk:high when a path in .github/risk-paths.json changes.
+# PR triage caller (core ADR-0068, ADR-0077, ADR-0078, docs/specs/pr-triage.md,
+# docs/specs/risk-paths.md): runs core's reusable pr-triage workflow on every
+# pull request. The `levels` step adds 1 level label, level:L1 to level:L4, and
+# the label risk:high for L1 and L2, from the paths in .github/risk-paths.json.
+# The `readiness` step removes ready-for-human when the head commit moves.
 #
 # Under pull_request_target the job runs trusted code only: core's workflow at
 # a pinned 40-character commit (ADR-0021). It checks out nothing from the PR.
-# No merge_group trigger, and not a required check. The label risk:high must
-# exist in the repository, or the job fails.
-name: Risk paths caller
+# No merge_group trigger, and not a required check. The labels risk:high and
+# level:L1 to level:L4 must exist in the repository: the job fails without
+# risk:high and warns without a level label.
+name: PR triage
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened, edited, labeled]
 
 permissions: {}
 
 jobs:
-  risk-paths:
+  pr-triage:
     permissions:
       contents: read
       pull-requests: write
-    uses: frostyard/core/.github/workflows/risk-paths.yml@408ec56ab05c9d40d9ea5308670e593955b34c6f # frostyard/core main, 2026-11-05 (core has no release tags)
+    uses: frostyard/core/.github/workflows/pr-triage.yml@c996ea3fb54bcf1a3c621113522213702a7673e2 # frostyard/core main, 2026-11-09 (core#225; core has no release tags)

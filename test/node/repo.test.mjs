@@ -6,7 +6,7 @@ import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync } from "
 import { join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { matchGlob, parseStrictJson, validateRiskPaths } from "../../scripts/lib/risk-paths.mjs";
+import { checkRequiredPaths, matchGlob, parseStrictJson, validateRiskPaths } from "../../scripts/lib/risk-paths.mjs";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 const read = (path) => readFileSync(join(root, path), "utf8");
@@ -26,8 +26,8 @@ function walk(dir) {
 const files = walk("");
 
 test("the vendored files are byte copies of frostyard/core", () => {
-  // Source: frostyard/core at 408ec56 (the same bytes as the template's pins).
-  assert.equal(sha256("scripts/lib/risk-paths.mjs"), "81a4e51e29b6ae754fdb9cbdf5edc712c47c893e7eadc3bbd17102749e051ba0");
+  // Source: frostyard/core at c996ea3 (core#225).
+  assert.equal(sha256("scripts/lib/risk-paths.mjs"), "6df0af009ff385467214f8df56aa5c5c92ac19ad26689b3344bb4d2654cdfa43");
   assert.equal(sha256("scripts/check-corrections.mjs"), "1894791a1945289c681a9f109d147e50dc342840bf9774b8349a5d63597725d6");
 });
 
@@ -36,9 +36,18 @@ const policy = parseStrictJson(read("policies/agent-governance.json"));
 
 test("the risk-path list is valid and has the required entries", () => {
   assert.deepEqual(validateRiskPaths(list), { ok: true, errors: [] });
-  for (const path of [".github/risk-paths.json", ".github/workflows/risk-paths-caller.yml"]) {
-    assert.ok(list.paths.some((p) => matchGlob(p.glob, path)), `no entry matches ${path}`);
-  }
+  // The list is version 2, so the level check of rule C applies to it.
+  assert.equal(list.schema_version, 2);
+  const required = [".github/risk-paths.json", ".github/workflows/risk-paths-caller.yml"];
+  // Rule C (core docs/specs/risk-paths.md): each required path matches a glob,
+  // and in a version 2 list each such glob is L1 or L2.
+  assert.deepEqual(checkRequiredPaths(list, required), []);
+  // The same check rejects a list that grades the list itself at L3.
+  const loosened = {
+    ...list,
+    paths: list.paths.map((entry) => (entry.glob === ".github/risk-paths.json" ? { ...entry, level: "L3" } : entry)),
+  };
+  assert.match(checkRequiredPaths(loosened, required).join("\n"), /must be L1 or L2/);
 });
 
 test("each risk path names 1 protected boundary of the policy, which lists the same glob", () => {
