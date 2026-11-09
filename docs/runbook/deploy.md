@@ -6,8 +6,9 @@ caddy's env file, never into Git, the homewiki or a report.
 
 ## 1. Repository settings
 
-- Create the labels `risk:high` and `ready-for-human` (the risk-paths caller
-  fails without `risk:high`).
+- Create the labels `risk:high`, `level:L1` to `level:L4` and `ready-for-human`
+  (the PR triage caller fails without `risk:high`, and it warns and adds no
+  level label while 1 of the 4 level labels is missing).
 - Make the job `ci` (workflow CI) a required check, with the merge queue
   (`merge_group` runs it).
 

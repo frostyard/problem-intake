@@ -8,7 +8,7 @@ raw report here. -->
 
 ## Risk tier
 
-Declare the highest applicable tier, never lower. A `risk:high` label (a path in `.github/risk-paths.json`) means tier 3.
+Declare the highest applicable tier, never lower. Core's `pr-triage` workflow sets 1 level label, `level:L1` to `level:L4`, from `.github/risk-paths.json` and core's organization floors; a `risk:high` label (a path at L1 or L2) means tier 3.
 
 Scale: 1 low = docs, tests, comments; 2 medium = behaviour change in code; 3 high = privacy, secrets, data deletion, publishing or deploy, CI and permissions, or any `risk:high` label.
 
