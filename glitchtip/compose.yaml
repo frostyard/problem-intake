@@ -1,6 +1,11 @@
 # GlitchTip for frostyard problem reports: a TrueNAS SCALE custom app
 # (docs/runbook/glitchtip.md, plan T857 section 5 "GlitchTip").
 #
+# 4 services: postgres, valkey, a one-shot migrate, and 1 web process that
+# serves HTTP and runs the task worker and the scheduler. This file works on
+# GlitchTip 6.2.6 and on GlitchTip 7.0 with no change but the image lines
+# (ADR-0007).
+#
 # Pinned by test/node/compose.test.mjs: 72-day event, transaction, file, log
 # and uptime life; sign-up and organization creation off; only web is
 # published, on 10.0.1.100; every image pinned by tag and digest; a
@@ -31,10 +36,10 @@ x-environment: &environment
   # and aggregate partitions and the issue cleanup up to 9 days; with 7 days
   # of snapshots the worst case is about 88 days, under the 90 days of the
   # privacy page (docs/runbook/glitchtip.md, "Retention").
-  GLITCHTIP_MAX_EVENT_LIFE_DAYS: "72"
-  GLITCHTIP_MAX_TRANSACTION_EVENT_LIFE_DAYS: "72"
-  GLITCHTIP_MAX_FILE_LIFE_DAYS: "72"
-  # The same 3 limits under their GlitchTip 6 names (they win over the old ones).
+  # These are the names that GlitchTip 6 and 7 read. GlitchTip 7.0 ignores the
+  # old GLITCHTIP_MAX_*_LIFE_DAYS names with a startup warning, and an ignored
+  # name would leave its value at the default:
+  # https://gitlab.com/glitchtip/glitchtip-backend/-/releases/v7.0.0
   GLITCHTIP_RETENTION_DAYS: "72"
   GLITCHTIP_EVENT_RETENTION_DAYS: "72"
   GLITCHTIP_TRANSACTION_RETENTION_DAYS: "72"
@@ -44,14 +49,14 @@ x-environment: &environment
   # No open sign-up: only the superuser adds users and organizations.
   ENABLE_USER_REGISTRATION: "false"
   ENABLE_SOCIAL_APPS_USER_REGISTRATION: "false"
-  ENABLE_OPEN_USER_REGISTRATION: "false"
   ENABLE_ORGANIZATION_CREATION: "false"
   # Features this store does not use.
   GLITCHTIP_ENABLE_UPTIME: "false"
   GLITCHTIP_ENABLE_LOGS: "false"
   GLITCHTIP_ENABLE_MCP: "false"
   VTASKS_CONCURRENCY: "2"
-  GRANIAN_WORKERS: "2"
+  # 1 process hosts HTTP, 1 task worker and the scheduler.
+  GRANIAN_WORKERS: "1"
 
 x-depends-on: &depends_on
   postgres:
@@ -102,7 +107,12 @@ services:
     env_file: *env_file
     environment:
       <<: *environment
-      SERVER_ROLE: web
+      # all_in_one runs the task worker and the scheduler in this process on
+      # 6.2.6, and it is what 7.0 does anyway: 7.0 refuses any other role but
+      # web, and warns on web. SKIP_INIT: migrate runs the migrations first.
+      # https://gitlab.com/glitchtip/glitchtip-backend/-/releases/v7.0.0
+      SERVER_ROLE: all_in_one
+      SKIP_INIT: "true"
     depends_on:
       <<: *depends_on
       migrate:
@@ -112,7 +122,9 @@ services:
       - "10.0.1.100:30053:8000"
     volumes:
       - /mnt/fast/glitchtip/uploads:/code/uploads
-    mem_limit: 768m
+    # The old web and worker limits added up. This process holds the task
+    # worker and the scheduler too.
+    mem_limit: 1536m
     healthcheck:
       # 1 shell string: some engines split the words of a CMD array item.
       test:
@@ -124,20 +136,3 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
-
-  worker:
-    image: glitchtip/glitchtip:6.2.6@sha256:a3d8eb1b36c1e1603d55ab32711ea3dd8115874742a781a57391a62a16e0dff6
-    # The task worker with its scheduler (GlitchTip 6 replaced Celery and beat).
-    command: ["./bin/run-worker.sh"]
-    restart: unless-stopped
-    env_file: *env_file
-    environment:
-      <<: *environment
-      SERVER_ROLE: worker
-    depends_on:
-      <<: *depends_on
-      migrate:
-        condition: service_completed_successfully
-    volumes:
-      - /mnt/fast/glitchtip/uploads:/code/uploads
-    mem_limit: 768m

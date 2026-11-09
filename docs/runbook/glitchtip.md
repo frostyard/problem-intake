@@ -3,7 +3,8 @@
 For Moneo (plan T857 t16) and Brian. GlitchTip stores the forwarded problem
 reports. It runs as a TrueNAS SCALE custom app from
 [glitchtip/compose.yaml](../../glitchtip/compose.yaml): GlitchTip 6.2.6
-(`web`, `worker`, one-shot `migrate`), Postgres 18.6 and Valkey 9.1.3, each
+(`web`, which serves HTTP and runs the task worker and the scheduler in 1
+process, and a one-shot `migrate`), Postgres 18.6 and Valkey 9.1.3, each
 pinned by tag and digest. No value in this runbook is a secret.
 
 ## Install
@@ -84,8 +85,8 @@ pinned by tag and digest. No value in this runbook is a secret.
    prints `1`.
 4. **App.** Apps → Discover Apps → Custom App → Install via YAML, name
    `glitchtip`. Paste `glitchtip/compose.yaml` from `main` as it is, with no
-   edit: it has no secret and no `${...}` reference. `postgres`, `migrate`,
-   `web` and `worker` read the env file with `env_file`; `valkey` reads
+   edit: it has no secret and no `${...}` reference. `postgres`, `migrate`
+   and `web` read the env file with `env_file`; `valkey` reads
    none. A key in a service's `environment` wins over the env file, so the
    Compose file never sets one of the 6 names (`test/node/compose.test.mjs`).
    INFERENCE, to prove at this install: TrueNAS custom apps accept the
@@ -157,8 +158,8 @@ Check the env file after any change, as in step 3 of [Install](#install).
 ## Users, organization, projects and DSNs
 
 Open sign-up and organization creation are off
-(`ENABLE_USER_REGISTRATION=false`, `ENABLE_OPEN_USER_REGISTRATION=false`,
-`ENABLE_ORGANIZATION_CREATION=false`). Only a superuser adds them.
+(`ENABLE_USER_REGISTRATION=false`, `ENABLE_ORGANIZATION_CREATION=false`).
+Only a superuser adds them.
 
 1. Create the superuser in the TrueNAS shell of the `web` container:
    `./manage.py createsuperuser` (Brian types the password; it is not
@@ -197,12 +198,13 @@ Open sign-up and organization creation are off
 ## Retention
 
 - Every retention value in `glitchtip/compose.yaml` is 72 days:
-  `GLITCHTIP_MAX_EVENT_LIFE_DAYS`, `GLITCHTIP_MAX_TRANSACTION_EVENT_LIFE_DAYS`,
-  `GLITCHTIP_MAX_FILE_LIFE_DAYS`, and the GlitchTip 6 names
   `GLITCHTIP_RETENTION_DAYS`, `GLITCHTIP_EVENT_RETENTION_DAYS`,
   `GLITCHTIP_TRANSACTION_RETENTION_DAYS`, `GLITCHTIP_FILE_RETENTION_DAYS`,
   `GLITCHTIP_LOG_RETENTION_DAYS` and `GLITCHTIP_UPTIME_RETENTION_DAYS`.
-  `test/node/compose.test.mjs` pins them.
+  `test/node/compose.test.mjs` pins them. GlitchTip 7.0 ignores the old
+  `GLITCHTIP_MAX_*_LIFE_DAYS` names, with a startup warning, and the value
+  then falls to the default of 90 days; `test/node/compose.test.mjs` refuses
+  them.
 - How GlitchTip 6.2.6 removes old data. Its nightly task
   `glitchtip.tasks.perform_maintenance` runs daily at 05:00 UTC.
   - Events are in daily partitions. `maintain_partitions` drops one when its
@@ -254,20 +256,34 @@ Open sign-up and organization creation are off
 Moneo applies GlitchTip updates, Django migrations included:
 
 1. Read the release notes from the pinned version to the new one.
-2. Open a PR here that changes the tag and the digest of `web`, `worker` and
-   `migrate` (the 3 must stay the same image). Get the digest with
+2. Open a PR here that changes the tag and the digest of `web` and
+   `migrate` (the 2 must stay the same image). Get the digest with
    `curl -s https://hub.docker.com/v2/repositories/glitchtip/glitchtip/tags/<tag>`
    or `skopeo inspect`. The GlitchTip CI job must pass.
 3. Run the snapshot task by hand (Data Protection → the task → Run Now).
 4. Update the app's YAML in TrueNAS with the merged `glitchtip/compose.yaml`.
    The diff shows only the image lines: the file holds no secret, and the env
-   file does not change. `migrate` runs before `web` and `worker` start.
+   file does not change. `migrate` runs before `web` starts.
 5. Check: the app RUNNING, `migrate` exited 0, `/_health/` answers `ok`
    ([Health check](#health-check)), and every project still has
    `scrub_ip_addresses` `True` (step 4 of
    [Users, organization, projects and DSNs](#users-organization-projects-and-dsns)).
+   Check that the scheduler runs:
+   `sudo docker exec ix-glitchtip-valkey-1 valkey-cli --scan --pattern '*vtasks_scheduler_lock*'`
+   prints 1 key.
 
 A Postgres major upgrade (18 to 19) is always an ask to Brian first.
+
+### GlitchTip 7.0
+
+Since GlitchTip 7.0 there is no separate worker: the `web` service runs the
+task worker and the scheduler ([ADR-0007](../adr/0007-glitchtip-runs-as-one-all-in-one-web-service.md)).
+`SERVER_ROLE=all_in_one` says so, on 6.2.6 and on 7.0. GlitchTip 7.0 refuses
+any role but `web` or `all_in_one`, and `bin/run-worker.sh` exits with an
+error. `glitchtip/compose.yaml` works on 6.2.6 and on 7.x, so the 7.0 update
+changes only the image lines of `web` and `migrate`. 7.0 needs a 6.x database
+(we run 6.2.6) and PostgreSQL 15 or later (we run 18.6). Release notes:
+[https://gitlab.com/glitchtip/glitchtip-backend/-/releases/v7.0.0](https://gitlab.com/glitchtip/glitchtip-backend/-/releases/v7.0.0).
 
 ## Health check
 
@@ -342,6 +358,7 @@ needed: the Worker answers 502 and senders retry the next day.
 
 - Rationale: [ADR-0003](../adr/0003-intake-worker-validates-strips-and-forwards.md),
   [ADR-0004](../adr/0004-glitchtip-env-file-and-72-day-retention.md) (env file, 72-day retention),
-  [ADR-0005](../adr/0005-the-worker-sends-no-report-id-tag.md) (no `report_id` tag)
+  [ADR-0005](../adr/0005-the-worker-sends-no-report-id-tag.md) (no `report_id` tag),
+  [ADR-0007](../adr/0007-glitchtip-runs-as-one-all-in-one-web-service.md) (1 all-in-one `web` service)
 - Context: [design/intake.md](../design/intake.md)
 - Deploy: [deploy.md](deploy.md)

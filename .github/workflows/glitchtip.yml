@@ -102,10 +102,27 @@ jobs:
           done
           [[ "$status" == healthy ]] || { echo "web healthcheck: $status"; exit 1; }
           # Only web publishes a port.
-          for service in postgres valkey worker; do
+          for service in postgres valkey; do
             ports="$(docker port "$($COMPOSE ps -q "$service")" || true)"
             [[ -z "$ports" ]] || { echo "$service publishes $ports"; exit 1; }
           done
+
+      - name: Check that the scheduler runs inside web
+        run: |
+          set -euo pipefail
+          # web runs the task worker and the scheduler (SERVER_ROLE=all_in_one),
+          # and the scheduler holds this key in Valkey while it runs.
+          for _ in $(seq 1 30); do
+            keys="$($COMPOSE exec -T valkey valkey-cli --scan --pattern '*vtasks_scheduler_lock*' || true)"
+            if [[ -n "$keys" ]]; then
+              echo "the scheduler holds its lock: $(wc -l <<<"$keys") key(s) match *vtasks_scheduler_lock*"
+              exit 0
+            fi
+            sleep 2
+          done
+          $COMPOSE logs --tail 100 web
+          echo "no vtasks_scheduler_lock key in valkey: the scheduler does not run"
+          exit 1
 
       - name: Create a user, an organization, a project and a token
         run: |
@@ -163,8 +180,8 @@ jobs:
             echo "the event did not arrive" >&2
             return 1
           }
-          issue_a="$(find_event "$REPORT_ID")" || { $COMPOSE logs --tail 100 web worker; exit 1; }
-          issue_b="$(find_event "$KEEP_ID")" || { $COMPOSE logs --tail 100 web worker; exit 1; }
+          issue_a="$(find_event "$REPORT_ID")" || { $COMPOSE logs --tail 100 web; exit 1; }
+          issue_b="$(find_event "$KEEP_ID")" || { $COMPOSE logs --tail 100 web; exit 1; }
           [[ "$issue_a" == "$issue_b" ]] || { echo "the 2 events are in 2 issues ($issue_a, $issue_b)"; exit 1; }
           echo "ISSUE_ID=$issue_a" >> "$GITHUB_ENV"
           export GLITCHTIP_WEB_CONTAINER
@@ -224,7 +241,7 @@ jobs:
             [[ "$issues" == 5 ]] && { echo "the issue list holds 5 issues"; exit 0; }
             sleep 5
           done
-          $COMPOSE logs --tail 100 web worker
+          $COMPOSE logs --tail 100 web
           echo "the issue list holds $issues issues, want 5"
           exit 1
 

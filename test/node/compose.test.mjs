@@ -19,21 +19,57 @@ const ENV_FILE_NAMES = [
   "ALLOWED_HOSTS",
   "DEFAULT_FROM_EMAIL",
 ];
-const ENV_FILE_SERVICES = ["postgres", "migrate", "web", "worker"];
+const ENV_FILE_SERVICES = ["postgres", "migrate", "web"];
 const SECRET_NAME = /(^|_)(SECRET|PASSWORD|TOKEN|KEY|DSN)(_|$)/;
 
 test("compose.yaml parses with no YAML error", () => {
   assert.deepEqual(doc.errors.map(String), []);
-  assert.deepEqual(Object.keys(services).sort(), ["migrate", "postgres", "valkey", "web", "worker"]);
+  assert.deepEqual(Object.keys(services).sort(), ["migrate", "postgres", "valkey", "web"]);
+});
+
+test("there is no worker service and no service runs run-worker.sh", () => {
+  assert.equal(services.worker, undefined, "a worker service");
+  for (const [name, service] of Object.entries(services)) {
+    assert.doesNotMatch(JSON.stringify(service.command ?? ""), /run-worker/, `${name} runs run-worker.sh`);
+  }
+});
+
+test("web runs the task worker in its own process", () => {
+  // all_in_one runs the task worker and the scheduler inside web on 6.2.6 and
+  // is what 7.0 does anyway; SKIP_INIT because migrate runs the migrations.
+  assert.equal(services.web.environment.SERVER_ROLE, "all_in_one");
+  assert.equal(services.web.environment.SKIP_INIT, "true");
+  // No command: the image CMD, ./bin/start.sh.
+  assert.equal(services.web.command, undefined, "web sets a command");
+});
+
+// https://gitlab.com/glitchtip/glitchtip-backend/-/releases/v7.0.0
+test("no service sets a name that GlitchTip 7.0 retired", () => {
+  const retired = [
+    "GLITCHTIP_MAX_EVENT_LIFE_DAYS",
+    "GLITCHTIP_MAX_TRANSACTION_EVENT_LIFE_DAYS",
+    "GLITCHTIP_MAX_FILE_LIFE_DAYS",
+    "GLITCHTIP_MAX_UPTIME_CHECK_LIFE_DAYS",
+    "GLITCHTIP_LOGS_COLD_DAYS",
+    "GLITCHTIP_EVENTS_HOT_DAYS",
+    "GLITCHTIP_LOGS_HOT_DAYS",
+    "ENABLE_OPEN_USER_REGISTRATION",
+    "GLITCHTIP_RUST_INGEST",
+    "USE_ASYNC_SERVER",
+    "IS_WORKER",
+    "DATABASE_CONN_MAX_AGE",
+  ];
+  for (const [name, service] of Object.entries(services)) {
+    for (const key of Object.keys(service.environment ?? {})) {
+      assert.ok(!retired.includes(key), `${name} sets the retired name ${key}`);
+    }
+  }
 });
 
 test("every retention value is 72 days in every GlitchTip service", () => {
-  for (const name of ["web", "worker", "migrate"]) {
+  for (const name of ["web", "migrate"]) {
     const env = services[name].environment;
     for (const key of [
-      "GLITCHTIP_MAX_EVENT_LIFE_DAYS",
-      "GLITCHTIP_MAX_TRANSACTION_EVENT_LIFE_DAYS",
-      "GLITCHTIP_MAX_FILE_LIFE_DAYS",
       "GLITCHTIP_RETENTION_DAYS",
       "GLITCHTIP_EVENT_RETENTION_DAYS",
       "GLITCHTIP_TRANSACTION_RETENTION_DAYS",
@@ -51,11 +87,10 @@ test("every retention value is 72 days in every GlitchTip service", () => {
 });
 
 test("open sign-up and organization creation are off", () => {
-  for (const name of ["web", "worker", "migrate"]) {
+  for (const name of ["web", "migrate"]) {
     const env = services[name].environment;
     assert.equal(env.ENABLE_USER_REGISTRATION, "false");
     assert.equal(env.ENABLE_SOCIAL_APPS_USER_REGISTRATION, "false");
-    assert.equal(env.ENABLE_OPEN_USER_REGISTRATION, "false");
     assert.equal(env.ENABLE_ORGANIZATION_CREATION, "false");
   }
 });
@@ -73,7 +108,6 @@ test("only web publishes a port, on 10.0.1.100", () => {
 test("data lives under /mnt/fast/glitchtip, and valkey has no volume", () => {
   assert.deepEqual(services.postgres.volumes, ["/mnt/fast/glitchtip/postgres:/var/lib/postgresql"]);
   assert.deepEqual(services.web.volumes, ["/mnt/fast/glitchtip/uploads:/code/uploads"]);
-  assert.deepEqual(services.worker.volumes, ["/mnt/fast/glitchtip/uploads:/code/uploads"]);
   assert.equal(services.valkey.volumes, undefined);
   assert.equal(compose.volumes, undefined, "no named volumes");
 });
@@ -82,8 +116,8 @@ test("every image is pinned by tag and digest", () => {
   for (const [name, service] of Object.entries(services)) {
     assert.match(service.image, /^[a-z0-9./-]+:[0-9][0-9A-Za-z.-]*@sha256:[0-9a-f]{64}$/, `${name}: ${service.image}`);
   }
-  const glitchtip = new Set(["web", "worker", "migrate"].map((n) => services[n].image));
-  assert.equal(glitchtip.size, 1, "web, worker and migrate run the same image");
+  const glitchtip = new Set(["web", "migrate"].map((n) => services[n].image));
+  assert.equal(glitchtip.size, 1, "web and migrate run the same image");
 });
 
 test("web, postgres and valkey have healthchecks; web checks /_health/", () => {
@@ -99,12 +133,9 @@ test("every service has a mem_limit", () => {
   }
 });
 
-test("migrate is a one-shot that web and worker wait for", () => {
+test("migrate is a one-shot that web waits for", () => {
   assert.equal(services.migrate.restart, "no");
-  for (const name of ["web", "worker"]) {
-    assert.deepEqual(services[name].depends_on.migrate, { condition: "service_completed_successfully" });
-  }
-  assert.deepEqual(services.worker.command, ["./bin/run-worker.sh"]);
+  assert.deepEqual(services.web.depends_on.migrate, { condition: "service_completed_successfully" });
 });
 
 test("the file has no variable reference: it deploys as it is", () => {
@@ -112,7 +143,7 @@ test("the file has no variable reference: it deploys as it is", () => {
   assert.doesNotMatch(text, /change_me|POSTGRES_HOST_AUTH_METHOD|trust/);
 });
 
-test("postgres, migrate, web and worker read the env file on the NAS; valkey reads none", () => {
+test("postgres, migrate and web read the env file on the NAS; valkey reads none", () => {
   for (const name of ENV_FILE_SERVICES) {
     assert.deepEqual(services[name].env_file, [ENV_FILE], `${name} env_file`);
   }
@@ -147,7 +178,7 @@ test(".env.example lists exactly the 6 env-file names, with no value", () => {
   assert.deepEqual(names.sort(), [...ENV_FILE_NAMES].sort());
 });
 
-test("compose.ci.yaml overrides the env file of the same 4 services", () => {
+test("compose.ci.yaml overrides the env file of the same 3 services", () => {
   const ci = parseDocument(readFileSync(new URL("../../glitchtip/compose.ci.yaml", import.meta.url), "utf8"), {
     uniqueKeys: true,
     customTags: [{ tag: "!override", resolve: (value) => value, collection: "seq" }],
