@@ -17,12 +17,23 @@ pinned by tag and digest. No value in this runbook is a secret.
      mode `0700`;
    - `/mnt/fast/glitchtip/secrets`, owner `root:root`, mode `0700`.
    No replication task and no rsync task covers this dataset.
-2. **Snapshot task.** 1 periodic snapshot task on `fast/glitchtip`: daily,
-   keep 7 days, not recursive into other datasets. Never take a manual
-   snapshot of this dataset and never let an app upgrade take one
-   (`ix-app-upgrade` snapshots never expire). The [Retention](#retention)
-   section shows why 72 days of retention plus 7 days of snapshots stays under
-   the 90 days that the privacy page promises.
+2. **Snapshot task.** 1 periodic snapshot task on `fast/glitchtip`: daily
+   at 00:00, keep 7 days, not recursive into other datasets. Only its
+   scheduled runs make snapshots of this dataset:
+   - Never take a manual snapshot and never let an app upgrade take one
+     (`ix-app-upgrade` snapshots never expire).
+   - Never use **Run Now** on the task. Retention never prunes a Run Now
+     snapshot: `fast/glitchtip@auto-2026-11-05_09-49` was still there on
+     2026-11-13, but the 00:00 snapshot of 2026-11-06 was pruned.
+   - Check: every snapshot of `fast/glitchtip` (Data Protection → Snapshots,
+     or `sudo zfs list -t snapshot -r fast/glitchtip`) has the time `00-00`
+     in its name. A snapshot with another time is outside the bound: destroy
+     it.
+
+   The [Retention](#retention) section shows why 72 days of retention plus 7
+   days of snapshots stays under the 90 days that the privacy page promises.
+   An update uses the 00:00 snapshot as its pre-update snapshot
+   ([Updates](#updates-plan-ask-t857g)).
 3. **Env file.** The secrets and host names are in 1 file,
    `/mnt/fast/glitchtip/secrets/glitchtip.env` (owner `root`, mode `0600`).
    It holds these 6 names ([glitchtip/.env.example](../../glitchtip/.env.example));
@@ -217,7 +228,9 @@ Only a superuser adds them.
 - The bound. With retention 72 and a daily snapshot kept 7 days, the worst
   case is about 81 days for an event and about 88 days for a tag row or an
   issue, under the 90 days of the privacy page. With retention 80 it was
-  about 96 days.
+  about 96 days. The bound holds only when the scheduled 00:00 runs of the
+  snapshot task make every snapshot of the dataset: a manual, app-upgrade
+  or Run Now snapshot is never pruned ([Install](#install), step 2).
 - **Cleanup proof.** [scripts/glitchtip-cleanup-proof.sh](../../scripts/glitchtip-cleanup-proof.sh)
   proves that the nightly task removes data older than the retention. Brian
   runs it once on TrueNAS before go-live, as root (it calls `docker exec`).
@@ -260,7 +273,13 @@ Moneo applies GlitchTip updates, Django migrations included:
    `migrate` (the 2 must stay the same image). Get the digest with
    `curl -s https://hub.docker.com/v2/repositories/glitchtip/glitchtip/tags/<tag>`
    or `skopeo inspect`. The GlitchTip CI job must pass.
-3. Run the snapshot task by hand (Data Protection → the task → Run Now).
+3. Wait for the daily 00:00 run of the snapshot task, and apply the update
+   soon after it, on the same day. That 00:00 snapshot is the pre-update
+   snapshot: check that it exists (`sudo zfs list -t snapshot -r fast/glitchtip`
+   shows `auto-<today>_00-00`). Never use **Run Now** on the snapshot task
+   and never take a manual snapshot: retention never prunes them
+   ([Install](#install), step 2). A rollback to the 00:00 snapshot loses the
+   reports stored after 00:00.
 4. Update the app's YAML in TrueNAS with the merged `glitchtip/compose.yaml`.
    The diff shows only the image lines: the file holds no secret, and the env
    file does not change. `migrate` runs before `web` starts.
@@ -332,7 +351,8 @@ this repository's `main` branch first, for example with
    (`sudo docker ps --format '{{.Names}}' | grep web`).
 3. Check: `--check` exits 3 ("no event with this report_id").
 4. Snapshots keep the deleted event up to 7 more days; that is in the
-   retention that the privacy page states.
+   retention that the privacy page states. It holds only while the
+   scheduled 00:00 runs make every snapshot ([Install](#install), step 2).
 
 Exit status of the script: 0, the event found (and deleted); 1, no result
 from GlitchTip; 2, a usage error or a report_id that is not a lowercase

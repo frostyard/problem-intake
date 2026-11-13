@@ -185,8 +185,10 @@ hosts and cannot change or delete an issue.
 
 GlitchTip 6.2.6 keeps the token value in clear in Postgres. After a delete, the
 snapshot task of the GlitchTip dataset keeps it up to 7 more days, readable
-only by the root user of the NAS. The retention arithmetic is in
-[glitchtip.md](glitchtip.md#retention).
+only by the root user of the NAS. That bound holds only while the task's
+scheduled 00:00 runs make every snapshot of the dataset: no manual snapshot
+and no Run Now ([glitchtip.md](glitchtip.md#install), step 2). The retention
+arithmetic is in [glitchtip.md](glitchtip.md#retention).
 
 ## Links
 
