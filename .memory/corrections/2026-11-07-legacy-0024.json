@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-07",
+  "scope": "docs triage clone node path",
+  "correction": "A command for the triage clone calls /usr/local/bin/node, as the units do; a bare node there is the mise shim, which stops on the untrusted mise.toml, so every doc that gives a job script command (AGENTS.md, design, runbook, specs) uses the full path",
+  "evidence": "frostyard/problem-intake#15, cross-review (openai/gpt-6.1-sol) of head 239725e, finding 1: docs/specs/triage.md still gave node scripts/triage/read.mjs --summary",
+  "promoted_to": "test/node/triage-node-path.test.mjs"
+}

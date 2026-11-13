@@ -15,13 +15,15 @@ the canonical paths; keep content tool-agnostic.
 ## Commands
 
 - `make verify`: tools present (Node 24 from `mise.toml`), `npm ci` done,
-  `.memory/corrections.jsonl` valid.
+  the records in `.memory/corrections/` valid.
 - `make check`: `make verify`, then `npm run check`: `tsc`, `wrangler types
   --check`, the generated-validator drift check, the node tests
   (`test/node/`), vitest with coverage (`test/*.test.ts`, in workerd), and
   `wrangler deploy --dry-run` into a temporary folder.
-- `make ci BASE=origin/main`: `make check` plus the append-only check of
-  `.memory/corrections.jsonl` against `BASE`. CI job `ci` runs it.
+- `make ci BASE=origin/main`: `make check` plus the records check of
+  `.memory/corrections/` against `BASE`: no record removed or renamed, only
+  an empty `promoted_to` filled, and the old corrections file does not come
+  back. CI job `ci` runs it.
 - `npm run build:validator`: regenerate `src/generated/validate-v1.js` from
   `schema/v1.json`.
 
@@ -123,8 +125,9 @@ then a fix or a quarantine in the same PR.
 
 **Blocker to guard.** When a review finds a blocking point, the PR that
 fixes it also adds a guard: a targeted test that fails without the fix, or an
-`AGENTS.md` rule when no test can catch it, and 1 line in
-`.memory/corrections.jsonl` ([.memory/README.md](.memory/README.md)).
+`AGENTS.md` rule when no test can catch it, and 1 record file under
+`.memory/corrections/` (name `<date>-pr-<N>-<words>.json`;
+[.memory/README.md](.memory/README.md)).
 
 **Risk paths.** [.github/risk-paths.json](.github/risk-paths.json) lists the
 high-risk paths; each `why` names 1 protected boundary of

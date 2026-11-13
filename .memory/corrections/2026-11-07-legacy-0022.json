@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-07",
+  "scope": "test/node/triage-publish.test.mjs timeout test",
+  "correction": "A timeout test injects the command executor of scripts/triage/lib/github.mjs, asserts the timeout value it asks for and answers with a timeout-shaped error: never a real wait in a fake and never a real subprocess timeout (AGENTS.md test reliability)",
+  "evidence": "frostyard/problem-intake#12, cross-review (openai/gpt-6.1-sol) re-review 4 of head 10bc39f, finding 1",
+  "promoted_to": "test/node/triage-publish.test.mjs"
+}

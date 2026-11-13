@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-07",
+  "scope": "scripts/triage/publish.mjs health notifications",
+  "correction": "A page gate that stops a read gives its own reason: the 2-call body reserve counts budget and the deadline counts deadline; only a read that runs out of pages with no such stop counts recovery",
+  "evidence": "frostyard/problem-intake#12, cross-review (openai/gpt-6.1-sol) re-review 4 of head 10bc39f, finding 2",
+  "promoted_to": "test/node/triage-publish.test.mjs"
+}

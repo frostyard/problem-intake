@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-06",
+  "scope": "docs/runbook/triage.md ssh checks",
+  "correction": "A remote command with quotes goes in double quotes as 1 ssh argument: ssh joins its arguments into 1 remote shell line, so stat -c '%U %a' loses its quotes and %a becomes a file name",
+  "evidence": "frostyard/problem-intake#10, cross-review (openai/gpt-6.1-sol) of head 186590e, finding 7",
+  "promoted_to": "test/node/triage-files.test.mjs"
+}

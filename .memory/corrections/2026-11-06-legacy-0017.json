@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-06",
+  "scope": "scripts/triage/read.mjs reader checks",
+  "correction": "Every check that can hold a problem runs on each observation before the representative event is chosen (a forged newer event must not hide a real 1); watched coverage counts the issues whose key the run learned; the 15-minute deadline covers the source checks; a location verifies when any candidate file has enough lines; the event list of GlitchTip 6.2.6 uses date_created",
+  "evidence": "frostyard/problem-intake#13, cross-review (openai/gpt-6.1-sol) of head a8a2361, findings F1 to F6, and the glitchtip-runbook job of that head (the reader stopped with error on date_created)",
+  "promoted_to": "test/node/triage-read.test.mjs"
+}

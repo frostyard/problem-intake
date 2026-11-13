@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-05",
+  "scope": "glitchtip compose secrets",
+  "correction": "Secrets in the Compose file (${NAME:?} values typed into the TrueNAS app YAML) are stored in the app and shown by every compose update dry run; read them from a root 0600 env file on the NAS with env_file, keep no ${ in the file, and never set an env-file name in environment (it wins over env_file)",
+  "evidence": "T857 t16 prep (Moneo), finding F1",
+  "promoted_to": "test/node/compose.test.mjs"
+}

@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-07",
+  "scope": "scripts/triage/publish.mjs and watchdog.mjs",
+  "correction": "A read that stops at a cap or a failed page is incomplete and never drives state; the call counter counts HTTP requests, so paged reads are explicit pages; a fix boundary is found by containment (binary search), never by a commit date; a once-only comment is guarded by durable state, not by the comments of 1 day",
+  "evidence": "frostyard/problem-intake#12, cross-review (openai/gpt-6.1-sol) re-review 1 of head efb6f10, findings 1 to 8",
+  "promoted_to": "test/node/triage-publish.test.mjs"
+}

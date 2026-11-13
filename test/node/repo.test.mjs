@@ -26,9 +26,10 @@ function walk(dir) {
 const files = walk("");
 
 test("the vendored files are byte copies of frostyard/core", () => {
-  // Source: frostyard/core at c996ea3 (core#225).
+  // Source: frostyard/core at c996ea3 (core#225) for risk-paths.mjs, and at
+  // c896282 for check-corrections.mjs (validator v2, core ADR-0081).
   assert.equal(sha256("scripts/lib/risk-paths.mjs"), "6df0af009ff385467214f8df56aa5c5c92ac19ad26689b3344bb4d2654cdfa43");
-  assert.equal(sha256("scripts/check-corrections.mjs"), "1894791a1945289c681a9f109d147e50dc342840bf9774b8349a5d63597725d6");
+  assert.equal(sha256("scripts/check-corrections.mjs"), "5c7a3a44a09d8c9d79efc919b42bb78b62b283616ffec16c211fe3e2b100008a");
 });
 
 const list = parseStrictJson(read(".github/risk-paths.json"));

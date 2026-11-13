@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-06",
+  "scope": "docs/specs/triage.md contract",
+  "correction": "A published frame is verified in full against an anchored grammar (the generic part is the literal [...] only), the problem key depends only on the raw fingerprint and the fixed form mapping (each observation's fingerprint values are checked at its own version), a watched key gets coverage with no observation, recovery resets lost progress, and the publisher refuses stale facts",
+  "evidence": "frostyard/problem-intake#10, cross-review (openai/gpt-6.1-sol) of head 186590e, findings 1 to 6",
+  "promoted_to": "docs/specs/triage.md"
+}
