@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-06",
+  "scope": "workflow pins (baseline B5)",
+  "correction": "Every external uses: needs a version comment, a reusable workflow of core too: core has no release tags, so its pin carries '# frostyard/core main, YYYY-MM-DD' (the commit date); the workflow test must not skip reusable workflows",
+  "evidence": "frostyard/problem-intake#7, cross-review (openai/gpt-6.1-sol) of head ada4347, finding 1: risk-paths-caller.yml pinned core with no comment and test/node/repo.test.mjs exempted it",
+  "promoted_to": "test/node/repo.test.mjs"
+}

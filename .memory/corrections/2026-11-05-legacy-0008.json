@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-05",
+  "scope": "glitchtip secret change",
+  "correction": "POSTGRES_PASSWORD only initializes a new data folder: a new value in the env file of an existing install locks GlitchTip out; change the password with ALTER ROLE first, then both env-file names, then redeploy, and never rerun the install snippet",
+  "evidence": "T857 t16 branch murbella/d3129231, cross-review (openai/gpt-6.1-sol) of head 54e9759, finding 4",
+  "promoted_to": "docs/runbook/glitchtip.md"
+}

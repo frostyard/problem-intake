@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-05",
+  "scope": "glitchtip retention",
+  "correction": "Weekly tag and aggregate partitions and the issue cleanup add up to retention + 9 days, so 80 days + 7 snapshot days broke the 90-day promise; retention is 72",
+  "evidence": "T857 t16, Murbella finding F5, GlitchTip 6.2.6 maintain_partitions.py",
+  "promoted_to": "test/node/compose.test.mjs"
+}

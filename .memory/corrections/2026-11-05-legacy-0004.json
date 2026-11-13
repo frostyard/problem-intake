@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-05",
+  "scope": "forward timeout test",
+  "correction": "A timeout test must prove the timeout: a mock that throws TimeoutError at once still passes with no signal; spy on AbortSignal.timeout for the value and keep the mock fetch pending until the signal it gets aborts",
+  "evidence": "T857 t15 branch murbella/ff3ccc5a, cross-review (openai/gpt-6.1-sol) of head e67bfea, finding 3",
+  "promoted_to": "test/report.test.ts"
+}

@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-05",
+  "scope": "forward",
+  "correction": "Releasing an upstream response body is best effort: response.body.cancel() rejects on an errored body, and outside the forward-result boundary it turned a GlitchTip 500 into a Worker 500 with no health point and could fail a 2xx; catch and ignore the rejection",
+  "evidence": "T857 t15 branch murbella/ff3ccc5a, cross-review (openai/gpt-6.1-sol) of head e67bfea, finding 2",
+  "promoted_to": "test/report.test.ts"
+}

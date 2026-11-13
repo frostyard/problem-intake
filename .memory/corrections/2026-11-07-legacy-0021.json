@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-07",
+  "scope": "scripts/triage/publish.mjs health phase",
+  "correction": "The run checkpoint and its pending notifications go in 1 health.json write before any comment, notification work keeps calls for the body, a rebuild counts distinct issues with a stable total_count, and a call killed at the work deadline is a deadline stop that still lets the health phase run",
+  "evidence": "frostyard/problem-intake#12, cross-review (openai/gpt-6.1-sol) re-review 3 of head fcd28bf, findings 1 to 5",
+  "promoted_to": "test/node/triage-publish.test.mjs"
+}

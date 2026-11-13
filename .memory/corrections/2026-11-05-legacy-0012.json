@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-05",
+  "scope": "docs/runbook/glitchtip.md IP scrubbing",
+  "correction": "GlitchTip 6.2.6 has no Scrub IP addresses setting in its UI; the project field scrub_ip_addresses defaults to True (apps/projects/models.py), so the runbook checks it with ./manage.py shell instead of a UI step",
+  "evidence": "T857 GlitchTip install, 2026-11-05: Brian found no such setting; glitchtip-backend v6.2.6 apps/projects/models.py scrub_ip_addresses default=True",
+  "promoted_to": "test/node/runbook.test.mjs"
+}

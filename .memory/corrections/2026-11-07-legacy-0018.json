@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-07",
+  "scope": "scripts/triage/publish.mjs and the fake gh",
+  "correction": "The fake gh must behave as the real gh: gh api graphql exits 1 on any GraphQL error and keeps the JSON on stdout, comments(last: 100) and releases come in pages of 100, and ghcr reads need the bearer token and config.Labels; GitHub action order must leave a marker that a later run can finish (comment before reopen), and every public text passes the day guard",
+  "evidence": "frostyard/problem-intake#12, cross-review (openai/gpt-6.1-sol) of head d59cb64, findings 1 to 10",
+  "promoted_to": "test/node/triage-publish.test.mjs"
+}

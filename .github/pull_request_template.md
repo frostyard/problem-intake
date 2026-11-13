@@ -38,4 +38,4 @@ Risk tier: 1 — <!-- justification -->
 - [ ] `make ci BASE=origin/main` green
 - [ ] Revert proof: the new test fails with the fix reverted; command and failing test: <!-- name them -->
 - [ ] Workflows changed: every action is SHA-pinned with `# vX.Y.Z`, `permissions: {}`, and `persist-credentials: false`
-- [ ] Blocking review point fixed: guard added and 1 `.memory/corrections.jsonl` line added
+- [ ] Blocking review point fixed: guard added and 1 file added under `.memory/corrections/`

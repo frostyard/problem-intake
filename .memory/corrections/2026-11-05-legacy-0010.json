@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-05",
+  "scope": "cleanup proof tag ownership",
+  "correction": "A cleanup must delete only the rows that its run created: record the tag key and value ids that exist before the run and delete only new, unreferenced ones; CI pre-creates the run's key and values and checks that they stay",
+  "evidence": "T857 t16 branch murbella/d3129231, cross-review (openai/gpt-6.1-sol) of head 54e9759, finding 3; re-review of head 06d5073",
+  "promoted_to": ".github/workflows/glitchtip.yml"
+}

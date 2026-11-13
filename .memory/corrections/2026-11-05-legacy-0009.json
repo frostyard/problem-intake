@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-05",
+  "scope": "report_id tag",
+  "correction": "GlitchTip keeps tag values for ever (issue_events_tagvalue has no cleanup), so a report_id tag outlives the event and the 90-day promise; the Worker sends the report_id only as event_id, and a test checks every fixture's tags",
+  "evidence": "T857 t16 branch murbella/d3129231, cross-review (openai/gpt-6.1-sol) of head 54e9759, finding 1",
+  "promoted_to": "test/envelope-report-id.test.ts"
+}

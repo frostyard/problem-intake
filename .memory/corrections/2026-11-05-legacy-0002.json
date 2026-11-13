@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-05",
+  "scope": "body limit",
+  "correction": "A byte limit on a stream must bound each read, not check after it: a default reader takes a whole chunk, so 8192 + 1024 bytes were read before the 8193-byte stop; read with a BYOB reader that asks for at most the remaining allowance + 1 byte",
+  "evidence": "T857 t15 branch murbella/ff3ccc5a, cross-review (openai/gpt-6.1-sol) of head e67bfea, finding 1",
+  "promoted_to": "test/body.test.ts"
+}

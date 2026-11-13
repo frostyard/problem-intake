@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-05",
+  "scope": "docs/runbook/glitchtip.md health checks",
+  "correction": "A health check to the published port http://10.0.1.100:30053/_health/ answers 400 because 10.0.1.100 is not in ALLOWED_HOSTS; send -H 'Host: localhost' or use the LAN UI site https://glitchtip.ketelsen.cloud/_health/",
+  "evidence": "T857 GlitchTip install on TrueNAS, 2026-11-05: Moneo and Odrade got 400 without the header and ok with it",
+  "promoted_to": "test/node/runbook.test.mjs"
+}

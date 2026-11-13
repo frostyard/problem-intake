@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-05",
+  "scope": "glitchtip cleanup proof output",
+  "correction": "A script that runs code in the GlitchTip container must not print exception messages or container stderr (they can hold any text, a secret too); print a fixed stage and the exception type, and pass on only lines of a strict shape",
+  "evidence": "T857 t16 branch murbella/d3129231, cross-review (openai/gpt-6.1-sol) of head 54e9759, finding 2",
+  "promoted_to": "test/node/cleanup-proof-output.test.mjs"
+}

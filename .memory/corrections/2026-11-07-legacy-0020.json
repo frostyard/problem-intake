@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-07",
+  "scope": "scripts/triage/publish.mjs and the fake gh",
+  "correction": "A fake answer must use the real REST shape (search items have repository_url, not repository), a search is complete only with incomplete_results false and every item of total_count, a once-only comment needs a durable pending record with an id in the comment, work calls never take the health reserve, and an unknown probe answer stops the search instead of reading as false",
+  "evidence": "frostyard/problem-intake#12, cross-review (openai/gpt-6.1-sol) re-review 2 of head 771958d, findings 1 to 6",
+  "promoted_to": "test/node/triage-publish.test.mjs"
+}
