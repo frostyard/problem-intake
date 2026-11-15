@@ -196,11 +196,14 @@ Only a superuser adds them.
    ./manage.py shell -c "from apps.projects.models import Project; print(Project.objects.filter(scrub_ip_addresses=False).update(scrub_ip_addresses=True))"
    ```
 
-   GlitchTip reads a client address from `X-Forwarded-For`; caddy strips
-   that header from the request (t17), and the scrub field is the second
-   guard. GlitchTip 7.0 reads the header only from a trusted proxy
-   (`TRUSTED_PROXIES`, unset: private addresses, so caddy at 10.0.1.234),
-   from the right ([GlitchTip 7.0](#glitchtip-70)). After a GlitchTip update,
+   GlitchTip stores a client address on an event from the forwarding
+   headers (`X-Forwarded-For` first). The Worker sends none of them
+   ([ADR-0003](../adr/0003-intake-worker-validates-strips-and-forwards.md)),
+   caddy strips `X-Forwarded-For`, `CF-Connecting-IP`, `True-Client-IP` and
+   `X-Real-IP` (t17), and the scrub field is the second guard.
+   `TRUSTED_PROXIES` is no guard for the event address: it sets only the
+   request client address (login throttle keys), not the address that
+   ingest stores ([GlitchTip 7.0](#glitchtip-70)). After a GlitchTip update,
    check the field again.
 5. Copy each project's DSN (Settings → Client Keys). The DSN host must be
    `intake.ketelsen.cloud` with no path prefix, for example
@@ -312,8 +315,19 @@ Release notes:
   (10.0.1.234). The Worker sends a new request with no client address
   ([ADR-0003](../adr/0003-intake-worker-validates-strips-and-forwards.md)),
   and caddy strips `X-Forwarded-For`, so no reporter address reaches
-  GlitchTip with either default. The old default `*` took the leftmost
+  GlitchTip with either default. `TRUSTED_PROXIES` sets only the request
+  client address (login throttle keys and the `REMOTE_ADDR` fallback;
+  `glitchtip/proxy_headers.py`). The old default `*` took the leftmost
   address, which a client can write; `private` reads from the right.
+- Event ingest does not use `TRUSTED_PROXIES`. It takes the event address
+  by the django-ipware `legacy` rules (`IPWARE_ALGORITHM` in
+  `glitchtip/settings.py`; the Rust envelope path follows the same rules):
+  the leftmost global address of the first header that parses, in the order
+  `X-Forwarded-For`, `Client-IP`, `X-Real-IP`, `X-Forwarded`,
+  `X-Cluster-Client-IP`, `Forwarded-For`, `Forwarded`, `CF-Connecting-IP`,
+  then `REMOTE_ADDR`, whatever `TRUSTED_PROXIES` holds. The guards for a
+  reporter address are the Worker's new request with 3 headers (ADR-0003),
+  caddy's header removal and `scrub_ip_addresses`.
 - 7.0 no longer recycles a granian worker on its resident memory. Memory
   can look higher than on 6.2.6. The bursts scale with the event volume and
   the ingest queue: `VTASKS_INGEST_CONCURRENCY` (unset, default 12) times
