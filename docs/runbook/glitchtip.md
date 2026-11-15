@@ -315,8 +315,11 @@ Release notes:
   GlitchTip with either default. The old default `*` took the leftmost
   address, which a client can write; `private` reads from the right.
 - 7.0 no longer recycles a granian worker on its resident memory. Memory
-  can look higher than on 6.2.6; the bursts scale with `VTASKS_CONCURRENCY`
-  (2 here) and the event volume. If `web` stops on its `mem_limit`, report
+  can look higher than on 6.2.6. The bursts scale with the event volume and
+  the ingest queue: `VTASKS_INGEST_CONCURRENCY` (unset, default 12) times
+  `VTASKS_INGEST_BATCH_COUNT` (unset, default 25) payloads while a backlog
+  drains. `VTASKS_CONCURRENCY` (2 here) does not bound the ingest queue,
+  which has its own setting. If `web` stops on its `mem_limit`, report
   it before a change to the limit.
 
 ## Health check
