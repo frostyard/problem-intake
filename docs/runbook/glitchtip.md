@@ -2,7 +2,7 @@
 
 For Moneo (plan T857 t16) and Brian. GlitchTip stores the forwarded problem
 reports. It runs as a TrueNAS SCALE custom app from
-[glitchtip/compose.yaml](../../glitchtip/compose.yaml): GlitchTip 6.2.6
+[glitchtip/compose.yaml](../../glitchtip/compose.yaml): GlitchTip 7.0.0
 (`web`, which serves HTTP and runs the task worker and the scheduler in 1
 process, and a one-shot `migrate`), Postgres 18.6 and Valkey 9.1.3, each
 pinned by tag and digest. No value in this runbook is a secret.
@@ -196,9 +196,12 @@ Only a superuser adds them.
    ./manage.py shell -c "from apps.projects.models import Project; print(Project.objects.filter(scrub_ip_addresses=False).update(scrub_ip_addresses=True))"
    ```
 
-   GlitchTip 6.2.6 has no setting to stop it from reading an address from
-   `X-Forwarded-For`; caddy strips that header (t17), and the scrub field is
-   the second guard. After a GlitchTip update, check the field again.
+   GlitchTip reads a client address from `X-Forwarded-For`; caddy strips
+   that header from the request (t17), and the scrub field is the second
+   guard. GlitchTip 7.0 reads the header only from a trusted proxy
+   (`TRUSTED_PROXIES`, unset: private addresses, so caddy at 10.0.1.234),
+   from the right ([GlitchTip 7.0](#glitchtip-70)). After a GlitchTip update,
+   check the field again.
 5. Copy each project's DSN (Settings → Client Keys). The DSN host must be
    `intake.ketelsen.cloud` with no path prefix, for example
    `https://<key>@intake.ketelsen.cloud/<project id>`. Brian builds the JSON
@@ -301,8 +304,20 @@ task worker and the scheduler ([ADR-0007](../adr/0007-glitchtip-runs-as-one-all-
 any role but `web` or `all_in_one`, and `bin/run-worker.sh` exits with an
 error. `glitchtip/compose.yaml` works on 6.2.6 and on 7.x, so the 7.0 update
 changes only the image lines of `web` and `migrate`. 7.0 needs a 6.x database
-(we run 6.2.6) and PostgreSQL 15 or later (we run 18.6). Release notes:
+(the update comes from 6.2.6) and PostgreSQL 15 or later (we run 18.6).
+Release notes:
 [https://gitlab.com/glitchtip/glitchtip-backend/-/releases/v7.0.0](https://gitlab.com/glitchtip/glitchtip-backend/-/releases/v7.0.0).
+
+- `TRUSTED_PROXIES` stays unset. The 7.0 default, `private`, trusts caddy
+  (10.0.1.234). The Worker sends a new request with no client address
+  ([ADR-0003](../adr/0003-intake-worker-validates-strips-and-forwards.md)),
+  and caddy strips `X-Forwarded-For`, so no reporter address reaches
+  GlitchTip with either default. The old default `*` took the leftmost
+  address, which a client can write; `private` reads from the right.
+- 7.0 no longer recycles a granian worker on its resident memory. Memory
+  can look higher than on 6.2.6; the bursts scale with `VTASKS_CONCURRENCY`
+  (2 here) and the event volume. If `web` stops on its `mem_limit`, report
+  it before a change to the limit.
 
 ## Health check
 

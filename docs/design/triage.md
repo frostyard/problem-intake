@@ -13,7 +13,7 @@ to its release, and reopen the issue when reports come back at or above that
 release.
 
 ```
-GlitchTip 6.2.6 (LAN, read-only token)
+GlitchTip 7.0.0 (LAN, read-only token)
    │  GET /api/0/organizations/frostyard/issues/ and /issues/{id}/events/
    ▼
 scripts/triage/read.mjs
