@@ -1,6 +1,6 @@
 // The public weekly aggregates, frostyard.problem-stats/1 (docs/specs/stats.md).
 // Rows come from the Analytics Engine SQL API and are validated against the
-// schema's enums and patterns before use; a bad row fails the whole job.
+// schema's enums and patterns before use; a bad row fails its whole week.
 import schema from "../schema/v1.json";
 import { CLASS_FIELD } from "./dimensions.ts";
 import { MIN_CELL, type PublishedTable, type RawTable, suppressTable } from "./suppress.ts";

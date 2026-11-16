@@ -64,8 +64,8 @@ sorted, no duplicates).
    checked: `kind` and `image_id` in the schema's enums, `image_version`
    matches `^[0-9]{14}$`, `class` in the enum of the kind's class field (empty
    for `count`), `app_id` in the allowlist for `app_problem` and empty
-   otherwise, the count a non-negative integer. 1 bad row fails the job, and
-   nothing is written.
+   otherwise, the count a non-negative integer. 1 bad row fails its week, and
+   nothing is written for that week; the other weeks of the run follow rule 1.
 3. A cell with a value of 0 is absent. A group with no cell is absent.
 4. **Primary suppression.** A value from 1 to `min_cell - 1` (1 to 4) is
    published as `null`: cells, group totals and the table total.
