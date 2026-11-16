@@ -1,7 +1,18 @@
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index.ts";
-import { HEALTH_CRON, HEALTH_KEY, INDEX_KEY, runHealthJob, runWeeklyJob, WEEKLY_CRON, weekKey, weeklySql } from "../src/jobs.ts";
+import {
+  CATCH_UP_WEEKS,
+  HEALTH_CRON,
+  HEALTH_KEY,
+  INDEX_KEY,
+  runHealthJob,
+  runWeeklyJob,
+  WEEKLY_CRON,
+  weekKey,
+  weeklySql,
+  weeksToRun,
+} from "../src/jobs.ts";
 import { countValue } from "../src/sql.ts";
 import { buildStats, validateRow } from "../src/stats.ts";
 import { call, type Captured, makeEnv, mockFetch, TEST_ACCOUNT, TEST_AE_TOKEN } from "./helpers.ts";
@@ -43,8 +54,8 @@ const ROWS = [
 describe("weekly job", () => {
   it("queries the previous ISO week with the read token and writes aggregates", async () => {
     const { calls } = mockFetch(() => sqlAnswer(ROWS));
-    const week = await runWeeklyJob(makeEnv(), MONDAY);
-    expect(week).toBe("2026-W45");
+    const weeks = await runWeeklyJob(makeEnv(), MONDAY);
+    expect(weeks).toEqual(["2026-W45"]);
     expect(calls).toHaveLength(1);
     const [sent] = calls;
     expect(sent.url).toBe(SQL_URL);
@@ -91,6 +102,56 @@ describe("weekly job", () => {
       schema: "frostyard.problem-stats-index/1",
       weeks: ["2026-W44", "2026-W45", "2026-W46"],
     });
+  });
+
+  it("aggregates the previous ISO week on a Monday, also across a year boundary", async () => {
+    mockFetch(() => sqlAnswer([]));
+    expect(await runWeeklyJob(makeEnv(), Date.UTC(2026, 10, 16, 3, 23))).toEqual(["2026-W46"]);
+    await clearKv();
+    expect(await runWeeklyJob(makeEnv(), Date.UTC(2027, 0, 4, 3, 23))).toEqual(["2026-W53"]);
+    await clearKv();
+    expect(await runWeeklyJob(makeEnv(), Date.UTC(2026, 0, 5, 3, 23))).toEqual(["2026-W01"]);
+  });
+
+  it("writes a missed week on the next run", async () => {
+    // The index of 2026-11-16: the job ran on Sundays and never wrote 2026-W46.
+    await env.STATS.put(INDEX_KEY, JSON.stringify({ weeks: ["2026-W44", "2026-W45"] }));
+    const { calls } = mockFetch(() => sqlAnswer([]));
+    expect(await runWeeklyJob(makeEnv(), Date.UTC(2026, 10, 23, 3, 23))).toEqual(["2026-W46", "2026-W47"]);
+    expect(calls.map((c) => c.body)).toEqual([
+      weeklySql(Date.UTC(2026, 10, 9), Date.UTC(2026, 10, 16)),
+      weeklySql(Date.UTC(2026, 10, 16), Date.UTC(2026, 10, 23)),
+    ]);
+    expect(await env.STATS.get(weekKey("2026-W46"))).not.toBeNull();
+    expect(await env.STATS.get(INDEX_KEY, "json")).toEqual({
+      schema: "frostyard.problem-stats-index/1",
+      weeks: ["2026-W44", "2026-W45", "2026-W46", "2026-W47"],
+    });
+  });
+
+  it("picks the weeks to run", () => {
+    expect(weeksToRun("2026-W45", [])).toEqual(["2026-W45"]);
+    expect(weeksToRun("2026-W45", ["2026-W44"])).toEqual(["2026-W45"]);
+    expect(weeksToRun("2026-W45", ["2026-W45", "2026-W42"])).toEqual(["2026-W43", "2026-W44", "2026-W45"]);
+    expect(weeksToRun("2027-W01", ["2026-W51"])).toEqual(["2026-W52", "2026-W53", "2027-W01"]);
+    // A gap older than the window stays a gap.
+    const old = weeksToRun("2026-W45", ["2026-W20"]);
+    expect(old).toHaveLength(CATCH_UP_WEEKS + 1);
+    expect(old[0]).toBe("2026-W37");
+  });
+
+  it("writes the weeks that pass when 1 week fails, and tries the failed week again", async () => {
+    await env.STATS.put(INDEX_KEY, JSON.stringify({ weeks: ["2026-W43"] }));
+    let i = 0;
+    mockFetch(() => sqlAnswer(i++ === 0 ? [{ ...ROWS[0], kind: "other" }] : []));
+    await expect(runWeeklyJob(makeEnv(), MONDAY)).rejects.toThrow("invalid_row");
+    expect(await env.STATS.get(weekKey("2026-W44"))).toBeNull();
+    expect(await env.STATS.get(weekKey("2026-W45"))).not.toBeNull();
+    expect(await env.STATS.get(INDEX_KEY, "json")).toEqual({
+      schema: "frostyard.problem-stats-index/1",
+      weeks: ["2026-W43", "2026-W45"],
+    });
+    expect(await runWeeklyJob(makeEnv(), MONDAY)).toEqual(["2026-W44", "2026-W45"]);
   });
 
   it.each([
@@ -194,7 +255,7 @@ describe("scheduled entry point", () => {
 
   it("matches the crons in wrangler.jsonc", () => {
     // test/node/wrangler-config.test.mjs pins the same 2 values in the file.
-    expect([HEALTH_CRON, WEEKLY_CRON]).toEqual(["17 * * * *", "23 3 * * 1"]);
+    expect([HEALTH_CRON, WEEKLY_CRON]).toEqual(["17 * * * *", "23 3 * * 2"]);
   });
 });
 

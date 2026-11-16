@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-16",
+  "scope": "src/jobs.ts, wrangler.jsonc",
+  "correction": "Cloudflare cron triggers count the days of the week from 1 = Sunday to 7 = Saturday: Monday is 2 (or MON), not 1. A weekly cron day must be checked with that numbering.",
+  "evidence": "frostyard/problem-intake#30: GET /v1/stats on Monday 2026-11-16 listed 2026-W45 as the newest week, because \"23 3 * * 1\" ran the job on Sunday",
+  "promoted_to": "test/node/wrangler-config.test.mjs"
+}

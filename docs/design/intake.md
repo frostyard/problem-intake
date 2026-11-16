@@ -56,8 +56,10 @@ cron Monday ──► SQL API ──► KV aggregates/<week>.json, aggregates/in
 - **Counting.** After a successful forward, and for each valid `count`, the
   Worker writes 1 point to `REPORTS`. A forward failure writes 1 point to
   `HEALTH` ([specs/analytics-points.md](../specs/analytics-points.md)).
-- **Aggregates.** The Monday cron (`23 3 * * 1`, UTC) reads the previous ISO
-  week with `SUM(_sample_interval)`, validates every row against the schema's
+- **Aggregates.** The Monday cron (`23 3 * * 2`, UTC; Cloudflare counts the
+  days of the week from 1 = Sunday) reads the previous ISO week and each
+  missing week of the 8 before it ([specs/stats.md](../specs/stats.md),
+  rule 1) with `SUM(_sample_interval)`, validates every row against the schema's
   enums and patterns, builds 3 independent tables and suppresses small and
   complementary cells, also against the bound that every listed value is 1
   or more ([specs/stats.md](../specs/stats.md), rules 4 to 7).
