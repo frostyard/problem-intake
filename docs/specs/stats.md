@@ -54,13 +54,18 @@ sorted, no duplicates).
 
 1. The weekly job runs on Monday at 03:23 UTC and aggregates the previous ISO
    week (UTC): the data points written from Monday 00:00 to the next Monday
-   00:00.
+   00:00. Its cron is `23 3 * * 2`: Cloudflare counts the days of the week
+   from 1 = Sunday, so 2 is Monday. A run also aggregates each week of the 8
+   weeks before the previous week that is after the first week in the index
+   and not in it, so a run that failed or did not fire is made up the next
+   Monday. Each week stands alone: a week that fails writes nothing and
+   stays out of the index, the other weeks are written, and the run fails.
 2. A count is `SUM(_sample_interval)`. Every row of the SQL answer is
    checked: `kind` and `image_id` in the schema's enums, `image_version`
    matches `^[0-9]{14}$`, `class` in the enum of the kind's class field (empty
    for `count`), `app_id` in the allowlist for `app_problem` and empty
-   otherwise, the count a non-negative integer. 1 bad row fails the job, and
-   nothing is written.
+   otherwise, the count a non-negative integer. 1 bad row fails its week, and
+   nothing is written for that week; the other weeks of the run follow rule 1.
 3. A cell with a value of 0 is absent. A group with no cell is absent.
 4. **Primary suppression.** A value from 1 to `min_cell - 1` (1 to 4) is
    published as `null`: cells, group totals and the table total.

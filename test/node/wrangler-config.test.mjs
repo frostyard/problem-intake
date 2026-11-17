@@ -61,7 +61,27 @@ test("the kill switch defaults to off", () => {
 });
 
 test("the crons are the hourly health job and the Monday aggregation", () => {
-  assert.deepEqual(config.triggers, { crons: ["17 * * * *", "23 3 * * 1"] });
+  assert.deepEqual(config.triggers, { crons: ["17 * * * *", "23 3 * * 2"] });
+});
+
+// Cloudflare numbers the days of the week from 1 = Sunday to 7 = Saturday
+// (https://developers.cloudflare.com/workers/configuration/cron-triggers/).
+// With "23 3 * * 1" the weekly job ran on Sunday, and on Monday the newest
+// published week was 2 weeks old.
+const CLOUDFLARE_DAYS = ["", "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+
+function cloudflareDay(field) {
+  const name = field.toUpperCase();
+  if (CLOUDFLARE_DAYS.includes(name) && name !== "") return name;
+  assert.match(field, /^[1-7]$/, `one day of the week, not ${field}`);
+  return CLOUDFLARE_DAYS[Number(field)];
+}
+
+test("the weekly cron fires on Monday at 03:23 UTC in Cloudflare's day numbering", () => {
+  const fields = config.triggers.crons[1].split(" ");
+  assert.equal(fields.length, 5);
+  assert.deepEqual(fields.slice(0, 4), ["23", "3", "*", "*"]);
+  assert.equal(cloudflareDay(fields[4]), "MON");
 });
 
 test("secrets are names only", () => {

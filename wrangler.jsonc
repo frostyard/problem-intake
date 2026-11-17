@@ -59,7 +59,7 @@
   ],
   "triggers": {
     // Hourly health job, and the weekly aggregation on Monday (UTC).
-    "crons": ["17 * * * *", "23 3 * * 1"]
+    "crons": ["17 * * * *", "23 3 * * 2"]
   },
   "vars": {
     "KILL_SWITCH": "off"
