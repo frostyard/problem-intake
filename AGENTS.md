@@ -152,6 +152,34 @@ hand (`test/node/repo.test.mjs` pins their sha256, and its rule C check uses
 the vendored `checkRequiredPaths`, so a version 2 glob that matches the list
 or the caller must be L1 or L2).
 
+## Releases and dependencies
+
+- Tag format: none. The repository has no version tags and no GitHub
+  releases.
+- How a release starts: there is no release. A push to `main` that touches
+  `src/**`, `schema/**`, `wrangler.jsonc`, `package.json`,
+  `package-lock.json` or `.github/workflows/deploy.yml` deploys the Worker
+  by `.github/workflows/deploy.yml` (`wrangler deploy`;
+  [docs/runbook/deploy.md](docs/runbook/deploy.md)).
+- Who tags: Brian. Agents never tag, push tags or release, and never start
+  `deploy.yml`.
+- Version rule: none for the Worker; a schema version is a new
+  `schema/vN.json` (see Deploy order above).
+- Internal dependencies, all from frostyard/core (core has no release tags,
+  so each is pinned to a commit):
+  - `frostyard/core/.github/workflows/pr-triage.yml` in
+    `.github/workflows/risk-paths-caller.yml` (commit SHA);
+  - the vendored `scripts/lib/risk-paths.mjs` and
+    `scripts/check-corrections.mjs` (sha256 in `test/node/repo.test.mjs`);
+  - `schema/v1.json`, a byte copy of core
+    `docs/specs/schemas/problem-report/v1.json` (sha256 in
+    `test/node/schema-and-envelope.test.mjs`).
+  - Not a dependency, but data: `triage/allow/` is seeded from a
+    frostyard/snosi commit by `scripts/triage/seed-allow.mjs`.
+- Who uses this repository: the senders on frostyard images (chairlift on
+  Snow, Snowfield and Sundog; `snosi-health` on Floe) post reports to the
+  Worker ([docs/design/intake.md](docs/design/intake.md)).
+
 ## Repository boundary
 
 - No deploy from a workstation: `.github/workflows/deploy.yml` deploys from
